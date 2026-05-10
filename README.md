@@ -1,6 +1,6 @@
 # Nova
 
-Nova is a **portable AI companion platform**: a cross-platform desktop shell built with **Tauri 2**, **React 19**, **TypeScript**, and **Vite**. The Rust backend lives in `src-tauri/`; the web UI lives in `src/`. Ship one codebase to Windows, macOS, and Linux (and extend toward mobile when you are ready).
+Nova is a **portable AI companion platform**: a cross-platform desktop shell built with **Tauri 2**, **React 19**, **TypeScript**, and **Vite**. The Rust backend lives in `src-tauri/`; the web UI lives in `src/`. Ship one codebase to Windows, macOS, and Linux, and eventually mobile.
 
 ## Repository layout
 
