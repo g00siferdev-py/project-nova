@@ -7,13 +7,15 @@ node_modules/
 dist/
 dist-ssr/
 build/
+out/
 *.local
+.vite/
 
 # Rust / Cargo
 **/target/
 target/
 
-# Tauri
+# Tauri (generated + local bundle noise)
 src-tauri/gen/schemas/
 
 # --- Environment & secrets ---
@@ -34,6 +36,8 @@ data/
 .nova_crypto/
 nova_memory.sqlite
 nova_memory.sqlite-*
+nova_memory.sqlite-wal
+nova_memory.sqlite-shm
 /settings.json
 /personality.json
 
@@ -48,13 +52,19 @@ lerna-debug.log*
 
 # --- OS & editors ---
 .DS_Store
+.AppleDouble
+.LSOverride
 Thumbs.db
+ehthumbs.db
+Desktop.ini
 .idea/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+*.swp
+*~
 
 # VS Code (keep extension recommendations if present)
 .vscode/*
@@ -69,6 +79,7 @@ Thumbs.db
 coverage/
 *.lcov
 .nyc_output/
+node_modules/.cache/
 
 # --- Test / misc ---
 *.orig

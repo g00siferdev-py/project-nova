@@ -1,58 +1,64 @@
 # Nova
 
-**Nova** is a privacy-oriented, portable desktop companion for working with large language models—chat, memory, and companion personality in one local-first application.
+**Nova** is a privacy-oriented, portable desktop companion for large language models: chat, long-term memory, and customizable companion personalities in one local-first application.
 
 ---
 
 ## Key features
 
-- **Memory Anchor** — Conversations, messages, anchors, projects, and preferences live in a local database. Startup briefings and recall help the model stay grounded in what matters for each thread.
-- **Customizable personalities** — Companion profiles shape tone and behavior; a live system-prompt preview reflects changes before they affect the next reply.
-- **Local-first** — Chat history and memory stay on the device. API traffic goes only to the providers configured in settings (for example OpenAI or Ollama); there is no Nova-operated cloud layer in the core product.
-- **Privacy-first** — API keys are stored with strong encryption; the design assumes sensitive threads and anchors should never leave the machine unless sent explicitly to a chosen provider.
-- **Portable / USB-friendly** — Data directory layouts support carrying the app and its data on removable media via documented environment variables (`NOVA_DATA_DIR`, `NOVA_PORTABLE`).
-- **Model-agnostic** — Multiple backends can be wired behind a shared engine interface; the UI focuses on provider selection, models, and generation parameters.
+- **Memory Anchor** — Conversations, messages, anchors, projects, and preferences stay in a local database. Startup briefings and recall help each thread stay grounded in what matters.
+- **Customizable personalities** — Companion profiles shape tone and behavior, with a live system-prompt preview before the next reply.
+- **Local-first** — Chat history and memory remain on the device. Network traffic goes only to the AI providers enabled in settings (for example OpenAI or Ollama). Nova does not operate a central cloud service for conversations or memory.
+- **Privacy-first** — API keys are protected with strong encryption. Messages and anchors are not sent anywhere except to the provider the installation is configured to use.
+- **Portable layouts** — Optional environment variables (`NOVA_DATA_DIR`, `NOVA_PORTABLE`) support fixed data locations, including removable drives.
+- **Model-agnostic** — Multiple provider backends share a common engine; the interface focuses on choosing providers, models, and generation parameters.
 
 ---
 
 ## Privacy and portability
 
-All conversation content, anchors, projects, and companion configuration are stored **locally** (SQLite plus JSON alongside the chosen data directory). Nothing is uploaded to a central Nova service by default.
+Conversation content, anchors, projects, and companion configuration are stored **locally** (SQLite and JSON under the active data directory). By default, nothing is uploaded to a Nova-operated service.
 
-For a fixed data location (including portable drives), set **`NOVA_DATA_DIR`** to the folder that should hold the database, settings, and personality files. Alternatively, **`NOVA_PORTABLE=1`** uses a `data/` directory next to the executable. When neither is set, the app uses the operating system’s standard application data location.
+- **`NOVA_DATA_DIR`** — Set to a folder where the database, settings, and personality files should live (ideal for a dedicated disk or USB layout).
+- **`NOVA_PORTABLE=1`** — Uses a `data/` directory next to the application executable.
+- **Default** — If neither option is set, data follows the operating system’s usual application data location for desktop apps.
 
 ---
 
-## Quick start
+## Quick start / how to run
 
-**Prerequisites:** [Rust](https://www.rust-lang.org/tools/install) (stable toolchain), [Node.js](https://nodejs.org/) (LTS recommended), and the [Tauri desktop prerequisites](https://v2.tauri.app/start/prerequisites/) for the target platform.
+**Prerequisites**
 
-From the project root after obtaining a copy of the source tree:
+- [Rust](https://www.rust-lang.org/tools/install) (stable toolchain) and `cargo`
+- [Node.js](https://nodejs.org/) (LTS recommended) and npm
+- [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for the target platform (Windows, macOS, or Linux)
+
+**Install dependencies** (from the project root):
 
 ```bash
 npm install
 ```
 
-**Run the full desktop app** (required for chat, streaming, and memory—the Vite-only preview has no Rust backend):
+**Run the desktop app** — Full chat, streaming, and memory require the Tauri shell:
 
 ```bash
 npm run tauri dev
 ```
 
-**Production build** (bundles the frontend and compiles the Tauri shell):
+A Vite-only web preview does not include the Rust backend; chat and persistence need the command above.
+
+**Production build** — Produces installable artifacts with the bundled frontend:
 
 ```bash
 npm run tauri build
 ```
 
----
+### First steps in the app
 
-## How to use
-
-- **Chat** — Select or create a conversation in the sidebar, compose a message, and send. Replies stream into the thread; history is persisted automatically.
-- **Personalities** — Open the settings rail, use the **Companion** area to edit profiles and companion details, and save. The active profile can be switched from the chat header so threads stay aligned with the chosen companion.
-- **Memory Anchor** — Each thread has a briefing area, anchor list, and recall tools in the sidebar. Anchors and recall augment the model context without replacing normal chat history.
-- **Settings** — The **General** section covers providers, API keys, models, temperature, and token limits. **Data controls** distinguish wiping stored memories from a full factory reset (settings, personalities, and database).
+- Open or create a conversation from the sidebar, send a message, and watch the assistant reply stream into the thread.
+- Use **Settings → Companion** to adjust companion profiles and save; switch the active profile from the chat header when needed.
+- Use the sidebar briefing, anchors, and recall tools to enrich context for the active thread.
+- Under **Settings → General**, configure providers, keys, models, temperature, and limits; data controls support wiping memories only or a full local reset.
 
 ---
 
@@ -63,20 +69,16 @@ npm run tauri build
 | Desktop shell | [Tauri 2](https://v2.tauri.app/) |
 | UI | [React 19](https://react.dev/), [TypeScript](https://www.typescriptlang.org/), [Vite 7](https://vitejs.dev/) |
 | Styling | [Tailwind CSS v4](https://tailwindcss.com/) |
-| Backend | Rust (SQLite via `rusqlite`, async HTTP, structured settings and personality modules) |
+| Backend | Rust (SQLite, async HTTP, settings and personality modules) |
 
 ---
 
-## Roadmap and current status
+## Project status
 
-Nova is in **early alpha**: core flows—streaming chat, memory, personalities, and settings—are functional, but polish, additional providers, automated tests, and further security review remain in progress.
-
-Near-term themes include real integrations beyond the current provider set, clearer portable-data workflows in the UI, expanded automated testing, and ongoing hardening of the desktop surface.
-
-For a deeper engineering snapshot and task backlog, see [`NOVA-STATUS.md`](./NOVA-STATUS.md).
+Nova is in **early alpha**: core flows are usable, while polish, more providers, automated tests, and continued security review remain on the roadmap. Feedback and contributions are welcome as the project moves toward a stable release.
 
 ---
 
 ## License
 
-Nova is released under the **MIT License**. See [`LICENSE`](./LICENSE).
+Distributed under the **MIT License**. See [`LICENSE`](./LICENSE).
