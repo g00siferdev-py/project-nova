@@ -32,6 +32,15 @@ export interface StoredMessage {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  /** Present when returned from cross-thread `memory_recall`. */
+  conversationId?: string;
+  conversationTitle?: string;
+}
+
+/** Hybrid recall from `memory_recall` (anchors + scoped messages). */
+export interface MemoryRecallBundle {
+  anchors: StoredAnchor[];
+  messages: StoredMessage[];
 }
 
 /** UI message (stable React keys). */

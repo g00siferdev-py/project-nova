@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  MemoryRecallBundle,
   StoredAnchor,
   StoredConversation,
   StoredMessage,
@@ -8,12 +9,22 @@ import type {
 
 export type InvokeMessageRole = "user" | "assistant";
 
+/** Sync MemoryAnchor + on-disk active companion (`memory_set_active_personality` IPC). */
+export async function memorySetActivePersonality(personalityId: string): Promise<void> {
+  console.info("[nova-chat] invoke memory_set_active_personality", { personalityId });
+  await invoke("memory_set_active_personality", { personalityId });
+  console.info("[nova-chat] memory_set_active_personality IPC finished", { personalityId });
+}
+
 export async function memoryListConversations(): Promise<StoredConversation[]> {
   return invoke<StoredConversation[]>("memory_list_conversations");
 }
 
 export async function memoryCreateConversation(title: string): Promise<string> {
-  return invoke<string>("memory_create_conversation", { title });
+  console.info("[nova-chat] invoke memory_create_conversation", { title });
+  const id = await invoke<string>("memory_create_conversation", { title });
+  console.info("[nova-chat] memory_create_conversation IPC finished", { conversationId: id, title });
+  return id;
 }
 
 export async function memoryGetConversation(
@@ -106,6 +117,21 @@ export async function memoryRecallAnchors(
     query,
     conversationId,
     limit,
+  });
+}
+
+/** FTS + keyword hybrid recall; optional scoped message hits (same thread). */
+export async function memoryRecall(
+  query: string,
+  conversationId: string | null | undefined,
+  anchorLimit = 12,
+  messageLimit = 6,
+): Promise<MemoryRecallBundle> {
+  return invoke<MemoryRecallBundle>("memory_recall", {
+    query,
+    conversationId: conversationId ?? null,
+    anchorLimit,
+    messageLimit,
   });
 }
 

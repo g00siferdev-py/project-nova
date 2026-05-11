@@ -1,4 +1,4 @@
-//! Offline placeholder and future-provider stubs (Anthropic, etc.).
+//! Offline placeholder when no remote model is configured.
 
 use async_trait::async_trait;
 
@@ -79,54 +79,6 @@ impl LLMProviderEngine for PlaceholderEngine {
                 delta: String::new(),
                 done: true,
             }))
-            .await;
-        Ok(())
-    }
-}
-
-/// Reserved for a future Anthropic Messages API implementation.
-pub struct AnthropicPlaceholder;
-
-impl AnthropicPlaceholder {
-    #[must_use]
-    pub const fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl LLMProviderEngine for AnthropicPlaceholder {
-    fn provider_id(&self) -> &'static str {
-        "anthropic"
-    }
-
-    fn model_info(&self) -> ModelInfo {
-        ModelInfo {
-            provider_id: "anthropic".to_string(),
-            model_id: "claude-3-5-sonnet (planned)".to_string(),
-            context_window_tokens: Some(200_000),
-        }
-    }
-
-    async fn complete(
-        &self,
-        _request: &CompletionRequest,
-    ) -> Result<CompletionResponse, ProviderError> {
-        Err(ProviderError::Api(
-            "Anthropic is not implemented yet. Switch to OpenAI or Ollama in provider settings."
-                .into(),
-        ))
-    }
-
-    async fn stream(
-        &self,
-        _request: &CompletionRequest,
-        tx: tokio::sync::mpsc::Sender<Result<StreamChunk, ProviderError>>,
-    ) -> Result<(), ProviderError> {
-        let _ = tx
-            .send(Err(ProviderError::Api(
-                "Anthropic streaming not implemented.".into(),
-            )))
             .await;
         Ok(())
     }

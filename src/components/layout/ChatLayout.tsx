@@ -29,6 +29,10 @@ export function ChatLayout() {
     deleteConversation,
     extractAnchorsFromChat,
     sendMessage,
+    applyActivePersonality,
+    activePersonalityId,
+    activeCompanionLabel,
+    companionOptions,
   } = useChat();
 
   const title = useMemo(() => {
@@ -68,8 +72,20 @@ export function ChatLayout() {
         settingsOpen={settingsOpen}
         onToggleSettings={() => setSettingsOpen((v) => !v)}
         onSendMessage={(text) => void sendMessage(text)}
+        activeCompanionProfileId={activePersonalityId}
+        activeCompanionLabel={activeCompanionLabel}
+        companionOptions={companionOptions}
+        onCompanionChange={async (profileId) => {
+          await applyActivePersonality(profileId);
+        }}
       />
-      <SettingsPanel open={settingsOpen} />
+      <SettingsPanel
+        open={settingsOpen}
+        chatActiveProfileId={activePersonalityId}
+        onCompanionActiveProfileChange={(profileId) =>
+          void applyActivePersonality(profileId)
+        }
+      />
     </div>
   );
 }

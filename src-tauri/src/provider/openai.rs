@@ -51,6 +51,19 @@ impl OpenAIProvider {
         }
     }
 
+    /// Chat Completions `max_tokens` is an output cap; never send values the API rejects.
+    fn clamp_completion_tokens_for_model(model: &str, requested: u32) -> u32 {
+        let m = model.to_lowercase();
+        let cap = if m.contains("gpt-3.5") && !m.contains("16k") && !m.contains("1106") {
+            4096u32
+        } else if m.contains("gpt-4") || m.contains("gpt-3.5") || m.contains("gpt-4o") {
+            16_384
+        } else {
+            16_384
+        };
+        requested.min(cap).max(1)
+    }
+
     fn build_body(&self, request: &CompletionRequest, stream: bool) -> Value {
         let mut body = json!({
             "model": self.model,
@@ -61,9 +74,10 @@ impl OpenAIProvider {
             body.as_object_mut().unwrap().insert("temperature".into(), json!(t));
         }
         if let Some(mt) = request.max_tokens {
+            let capped = Self::clamp_completion_tokens_for_model(&self.model, mt);
             body.as_object_mut()
                 .unwrap()
-                .insert("max_tokens".into(), json!(mt));
+                .insert("max_tokens".into(), json!(capped));
         }
         if let Some(ref tools) = request.tools {
             if !tools.is_empty() {
@@ -235,4 +249,40 @@ impl LLMProviderEngine for OpenAIProvider {
             .await;
         Ok(())
     }
+}
+
+/// Lists model ids from OpenAI-compatible `GET {base}/models` (requires saved OpenAI API key).
+pub async fn fetch_openai_model_ids(
+    http: &reqwest::Client,
+    settings: &SettingsManager,
+) -> Result<Vec<String>, ProviderError> {
+    let api_key = settings
+        .decrypt_api_key("openai")?
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(ProviderError::MissingApiKey("openai"))?;
+    let base = settings.openai_base_url();
+    let base = base.trim_end_matches('/');
+    let url = format!("{}/models", base);
+    let res = http
+        .get(&url)
+        .bearer_auth(api_key.trim())
+        .timeout(Duration::from_secs(45))
+        .send()
+        .await?
+        .error_for_status()?;
+    let v: Value = res.json().await?;
+    if let Some(msg) = v["error"]["message"].as_str() {
+        return Err(ProviderError::Api(msg.to_string()));
+    }
+    let mut names = Vec::new();
+    if let Some(data) = v["data"].as_array() {
+        for m in data {
+            if let Some(id) = m["id"].as_str() {
+                names.push(id.to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
 }

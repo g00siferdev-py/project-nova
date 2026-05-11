@@ -1,0 +1,38 @@
+# Application IPC allowlist for the Nova main webview (replaces implicit allow-all for custom commands).
+[[permission]]
+identifier = "nova-invoke-allowlist"
+description = "Custom invoke commands used by the Nova UI (see generate_handler! in lib.rs)."
+commands.allow = [
+  "app_version",
+  "provider_info",
+  "provider_list_available",
+  "ollama_cloud_list_models",
+  "openai_list_models",
+  "ollama_list_local_models",
+  "anthropic_list_models",
+  "provider_switch",
+  "settings_get",
+  "settings_update",
+  "settings_save_api_key",
+  "database_wipe_memories",
+  "database_wipe_all",
+  "personality_get",
+  "personality_save",
+  "chat_send_message",
+  "memory_set_active_personality",
+  "memory_list_conversations",
+  "memory_get_conversation",
+  "memory_create_conversation",
+  "memory_rename_conversation",
+  "delete_conversation",
+  "memory_store_message",
+  "memory_get_recent",
+  "memory_startup_briefing",
+  "memory_update_startup_briefing",
+  "memory_create_anchor",
+  "memory_extract_anchors_from_conversation",
+  "memory_recall_anchors",
+  "memory_recall",
+  "memory_list_anchors",
+  "memory_list_projects",
+]

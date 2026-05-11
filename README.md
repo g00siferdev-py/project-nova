@@ -1,57 +1,86 @@
 # Nova
 
+<<<<<<< HEAD
 Nova is a **portable AI companion platform**: a cross-platform desktop shell built with **Tauri 2**, **React 19**, **TypeScript**, and **Vite**. The Rust backend lives in `src-tauri/`; the web UI lives in `src/`. Ship one codebase to Windows, macOS, and Linux, and eventually mobile.
+=======
+**Nova** is a privacy-oriented, portable desktop companion for working with large language models—chat, memory, and companion personality in one local-first application.
+>>>>>>> 9bfdbdd (feat: security hardening, improved provider UX (Anthropic + Ollama Cloud + dynamic models), public README)
 
-## Repository layout
+---
 
-| Path | Role |
-|------|------|
-| `src/` | React + TypeScript UI (Vite entry at `main.tsx`) |
-| `src/components/` | Reusable UI (e.g. `layout/AppShell`) |
-| `src/features/` | Vertical slices (chat, memory, tools, etc.) |
-| `src/hooks/` | Shared React hooks |
-| `src/lib/` | Thin clients and helpers (e.g. Tauri `invoke` re-exports) |
-| `src/styles/` | Global styles |
-| `src/types/` | Shared TypeScript types |
-| `src-tauri/` | Rust crate, Tauri config, capabilities, icons |
-| `src-tauri/src/commands/` | `#[tauri::command]` handlers registered in `lib.rs` |
-| `src-tauri/capabilities/` | [Capability](https://v2.tauri.app/security/capabilities/) JSON for IPC and APIs |
-| `public/` | Static assets served as-is (favicon, `nova-icon.svg`, etc.) |
+## Key features
 
-Path alias **`@/*`** maps to `./src/*` (see `tsconfig.json` and `vite.config.ts`).
+- **Memory Anchor** — Conversations, messages, anchors, projects, and preferences live in a local database. Startup briefings and recall help the model stay grounded in what matters for each thread.
+- **Customizable personalities** — Companion profiles shape tone and behavior; a live system-prompt preview reflects changes before they affect the next reply.
+- **Local-first** — Chat history and memory stay on the device. API traffic goes only to the providers configured in settings (for example OpenAI or Ollama); there is no Nova-operated cloud layer in the core product.
+- **Privacy-first** — API keys are stored with strong encryption; the design assumes sensitive threads and anchors should never leave the machine unless sent explicitly to a chosen provider.
+- **Portable / USB-friendly** — Data directory layouts support carrying the app and its data on removable media via documented environment variables (`NOVA_DATA_DIR`, `NOVA_PORTABLE`).
+- **Model-agnostic** — Multiple backends can be wired behind a shared engine interface; the UI focuses on provider selection, models, and generation parameters.
 
-## Prerequisites
+---
 
-- [Rust](https://www.rust-lang.org/tools/install) (stable), `cargo`
-- [Node.js](https://nodejs.org/) (LTS recommended) and npm
-- Platform libraries for Tauri on Linux: see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/)
+## Privacy and portability
 
-## Scripts
+All conversation content, anchors, projects, and companion configuration are stored **locally** (SQLite plus JSON alongside the chosen data directory). Nothing is uploaded to a central Nova service by default.
 
-```bash
-npm install          # install frontend + CLI
-npm run dev          # Vite dev server (port 1420)
-npm run tauri dev    # desktop app + hot reload
-npm run build        # production frontend → dist/
-npm run tauri build  # bundle installers with embedded dist/
-```
+For a fixed data location (including portable drives), set **`NOVA_DATA_DIR`** to the folder that should hold the database, settings, and personality files. Alternatively, **`NOVA_PORTABLE=1`** uses a `data/` directory next to the executable. When neither is set, the app uses the operating system’s standard application data location.
 
-Regenerate tray and installer icons from the square source in `public/nova-icon.svg`:
+---
+
+## Quick start
+
+**Prerequisites:** [Rust](https://www.rust-lang.org/tools/install) (stable toolchain), [Node.js](https://nodejs.org/) (LTS recommended), and the [Tauri desktop prerequisites](https://v2.tauri.app/start/prerequisites/) for the target platform.
+
+From the project root after obtaining a copy of the source tree:
 
 ```bash
-npx tauri icon public/nova-icon.svg
+npm install
 ```
 
-## Configuration
+**Run the full desktop app** (required for chat, streaming, and memory—the Vite-only preview has no Rust backend):
 
-- **`src-tauri/tauri.conf.json`** — app id `app.nova.desktop`, window `main`, dev URL, bundle icons.
-- **`src-tauri/capabilities/default.json`** — permissions for the `main` window (start with `core:default`; tighten as you add plugins).
-- **`package.json` / `Cargo.toml`** — aligned naming: npm package `nova`, Rust crate `nova`, library `nova_lib`.
+```bash
+npm run tauri dev
+```
 
-## Security note
+**Production build** (bundles the frontend and compiles the Tauri shell):
 
-Capabilities gate what the webview can invoke. Add explicit permissions when you introduce plugins (filesystem, HTTP, shell, etc.); avoid widening `core:default` more than you need.
+```bash
+npm run tauri build
+```
+
+---
+
+## How to use
+
+- **Chat** — Select or create a conversation in the sidebar, compose a message, and send. Replies stream into the thread; history is persisted automatically.
+- **Personalities** — Open the settings rail, use the **Companion** area to edit profiles and companion details, and save. The active profile can be switched from the chat header so threads stay aligned with the chosen companion.
+- **Memory Anchor** — Each thread has a briefing area, anchor list, and recall tools in the sidebar. Anchors and recall augment the model context without replacing normal chat history.
+- **Settings** — The **General** section covers providers, API keys, models, temperature, and token limits. **Data controls** distinguish wiping stored memories from a full factory reset (settings, personalities, and database).
+
+---
+
+## Tech stack
+
+| Layer | Technologies |
+|--------|----------------|
+| Desktop shell | [Tauri 2](https://v2.tauri.app/) |
+| UI | [React 19](https://react.dev/), [TypeScript](https://www.typescriptlang.org/), [Vite 7](https://vitejs.dev/) |
+| Styling | [Tailwind CSS v4](https://tailwindcss.com/) |
+| Backend | Rust (SQLite via `rusqlite`, async HTTP, structured settings and personality modules) |
+
+---
+
+## Roadmap and current status
+
+Nova is in **early alpha**: core flows—streaming chat, memory, personalities, and settings—are functional, but polish, additional providers, automated tests, and further security review remain in progress.
+
+Near-term themes include real integrations beyond the current provider set, clearer portable-data workflows in the UI, expanded automated testing, and ongoing hardening of the desktop surface.
+
+For a deeper engineering snapshot and task backlog, see [`NOVA-STATUS.md`](./NOVA-STATUS.md).
+
+---
 
 ## License
 
-Add a license file when you choose one for Nova.
+Nova is released under the **MIT License**. See [`LICENSE`](./LICENSE).

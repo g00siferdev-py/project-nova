@@ -210,6 +210,32 @@ impl PersonalityManager {
             .unwrap_or_default()
     }
 
+    /// Set which profile supplies the chat persona (`system_prompt_prefix`), persist to disk.
+    /// Must stay in sync with MemoryAnchor active personality for the same `profile_id`.
+    pub fn set_active_profile_id(&self, profile_id: &str) -> Result<(), PersonalityError> {
+        let mut id = profile_id.trim().to_string();
+        if id.is_empty() {
+            id = "default".into();
+        }
+        {
+            let mut inner = self
+                .inner
+                .write()
+                .map_err(|_| PersonalityError::Invalid("lock poisoned".into()))?;
+            if !inner.profiles.iter().any(|p| p.id == id) {
+                return Err(PersonalityError::Invalid(format!(
+                    "unknown personality profile id: {id}"
+                )));
+            }
+            if inner.active_profile_id == id {
+                return Ok(());
+            }
+            inner.active_profile_id = id.clone();
+        }
+        eprintln!("nova: PersonalityManager set_active_profile_id -> {id} (persisting)");
+        self.persist_unlocked()
+    }
+
     pub fn replace_all(&self, mut file: PersonalityFile) -> Result<(), PersonalityError> {
         if file.profiles.is_empty() {
             return Err(PersonalityError::Invalid(

@@ -17,12 +17,13 @@ mod provider;
 use std::sync::Arc;
 
 use memory::{
-    AnchorType, ConversationMemory, MemoryAnchor, MessageRole, StoredAnchor, StoredConversation,
-    StoredMessage, StoredProject,
+    AnchorType, ConversationMemory, MemoryAnchor, MemoryRecallBundle, MessageRole, StoredAnchor,
+    StoredConversation, StoredMessage, StoredProject, DEFAULT_PERSONALITY_ID,
 };
 use provider::{
-    build_engine, list_provider_descriptors, LLMProviderEngine, PlaceholderEngine,
-    ProviderDescriptor, ProviderError,
+    build_engine, fetch_anthropic_model_ids, fetch_ollama_cloud_model_tags,
+    fetch_ollama_local_model_tags, fetch_openai_model_ids, list_provider_descriptors,
+    LLMProviderEngine, PlaceholderEngine, ProviderDescriptor, ProviderError,
 };
 use personality::{PersonalityFile, PersonalityManager, PersonalitySnapshot};
 use settings::{SettingsManager, SettingsUpdatePayload, SettingsView};
@@ -107,6 +108,34 @@ fn provider_list_available() -> Vec<ProviderDescriptor> {
 }
 
 #[tauri::command]
+async fn ollama_cloud_list_models(state: State<'_, NovaState>) -> Result<Vec<String>, String> {
+    fetch_ollama_cloud_model_tags(&state.http, &state.settings)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn openai_list_models(state: State<'_, NovaState>) -> Result<Vec<String>, String> {
+    fetch_openai_model_ids(&state.http, &state.settings)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn ollama_list_local_models(state: State<'_, NovaState>) -> Result<Vec<String>, String> {
+    fetch_ollama_local_model_tags(&state.http, &state.settings)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn anthropic_list_models(state: State<'_, NovaState>) -> Result<Vec<String>, String> {
+    fetch_anthropic_model_ids(&state.http, &state.settings)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn provider_switch(state: State<'_, NovaState>, provider_id: String) -> Result<(), String> {
     let id = provider_id.trim().to_lowercase();
     state
@@ -173,6 +202,60 @@ async fn settings_save_api_key(
             eprintln!("nova: rebuild LLM after API key save failed ({e})");
         }
     }
+    Ok(())
+}
+
+/// Clears only the SQLite memory store (conversations, messages, anchors, projects, preferences).
+/// Does not modify `settings.json`, API keys, or `personality.json`.
+#[tauri::command]
+async fn database_wipe_memories(state: State<'_, NovaState>) -> Result<(), String> {
+    eprintln!("nova: ipc database_wipe_memories — SQLite user tables only");
+    state
+        .memory
+        .wipe_all_user_data()
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Permanently clears SQLite memory data and resets `settings.json` / `personality.json` to defaults.
+#[tauri::command]
+async fn database_wipe_all(state: State<'_, NovaState>) -> Result<(), String> {
+    eprintln!("nova: ipc database_wipe_all — SQLite + settings + personality");
+    state
+        .memory
+        .wipe_all_user_data()
+        .map_err(|e| e.to_string())?;
+    state
+        .settings
+        .reset_to_install_defaults()
+        .map_err(|e| e.to_string())?;
+    state
+        .personality
+        .replace_all(PersonalityFile::default())
+        .map_err(|e| e.to_string())?;
+    ConversationMemory::set_active_personality(&*state.memory, DEFAULT_PERSONALITY_ID);
+    match build_engine(&state.http, &state.settings) {
+        Ok(engine) => *state.llm.write().await = engine,
+        Err(e) => {
+            eprintln!("nova: database_wipe_all rebuild LLM failed ({e}), using placeholder");
+            *state.llm.write().await = Arc::new(PlaceholderEngine::new());
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn memory_set_active_personality(state: State<NovaState>, personality_id: String) -> Result<(), String> {
+    let mut tid = personality_id.trim().to_string();
+    if tid.is_empty() {
+        tid = DEFAULT_PERSONALITY_ID.to_string();
+    }
+    eprintln!("nova: ipc memory_set_active_personality personality_id={tid} (sync persona + memory)");
+    state
+        .personality
+        .set_active_profile_id(&tid)
+        .map_err(|e| e.to_string())?;
+    state.memory.set_active_personality(&tid);
     Ok(())
 }
 
@@ -314,6 +397,27 @@ fn memory_recall_anchors(
         .map_err(|e| e.to_string())
 }
 
+/// Hybrid FTS + keyword anchor recall and optional scoped message hits.
+#[tauri::command]
+fn memory_recall(
+    state: State<NovaState>,
+    query: String,
+    conversation_id: Option<String>,
+    anchor_limit: Option<usize>,
+    message_limit: Option<usize>,
+) -> Result<MemoryRecallBundle, String> {
+    let scope = conversation_id.as_deref().filter(|s| !s.trim().is_empty());
+    state
+        .memory
+        .memory_recall(
+            &query,
+            scope,
+            anchor_limit.unwrap_or(12).max(1).min(64),
+            message_limit.unwrap_or(6).max(0).min(24),
+        )
+        .map_err(|e| e.to_string())
+}
+
 /// Anchors for this thread plus global (`conversation_id` NULL).
 #[tauri::command]
 fn memory_list_anchors(
@@ -357,13 +461,20 @@ pub fn run() {
             app_version,
             provider_info,
             provider_list_available,
+            ollama_cloud_list_models,
+            openai_list_models,
+            ollama_list_local_models,
+            anthropic_list_models,
             provider_switch,
             settings_get,
             settings_update,
             settings_save_api_key,
+            database_wipe_memories,
+            database_wipe_all,
             personality_get,
             personality_save,
             chat::chat_send_message,
+            memory_set_active_personality,
             memory_list_conversations,
             memory_get_conversation,
             memory_create_conversation,
@@ -376,6 +487,7 @@ pub fn run() {
             memory_create_anchor,
             memory_extract_anchors_from_conversation,
             memory_recall_anchors,
+            memory_recall,
             memory_list_anchors,
             memory_list_projects,
         ])

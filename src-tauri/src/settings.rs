@@ -17,6 +17,7 @@ use base64::Engine;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, NONCE_LEN};
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use thiserror::Error;
 
 use crate::memory::{ConversationMemory, MemoryError};
@@ -114,6 +115,7 @@ pub struct SettingsView {
     pub max_tokens: Option<u32>,
     pub has_openai_api_key: bool,
     pub has_anthropic_api_key: bool,
+    pub has_ollama_api_key: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -126,8 +128,9 @@ pub struct SettingsUpdatePayload {
     pub ollama_base_url: Option<String>,
     pub anthropic_model: Option<String>,
     pub temperature: Option<f32>,
-    /// `None` = omit (no change). `Some(None)` = clear. `Some(Some(n))` = set.
-    pub max_tokens: Option<Option<u32>>,
+    /// Omitted = no change. JSON `null` = clear cap. Number = set cap (`Option<Option<u32>>`
+    /// cannot represent “present null” from JS; use [`JsonValue`]).
+    pub max_tokens: Option<JsonValue>,
 }
 
 // --- Crypto ------------------------------------------------------------------
@@ -380,6 +383,7 @@ impl SettingsManager {
     fn strip_secret_sqlite_prefs(&self) -> Result<(), SettingsError> {
         let _ = self.memory.preference_delete("nova.openai.api_key");
         let _ = self.memory.preference_delete("nova.anthropic.api_key");
+        let _ = self.memory.preference_delete("nova.ollama.api_key");
         Ok(())
     }
 
@@ -399,6 +403,7 @@ impl SettingsManager {
                 &self.aes_key,
                 inner.encrypted_api_keys.get("anthropic"),
             ),
+            has_ollama_api_key: can_decrypt_api_blob(&self.aes_key, inner.encrypted_api_keys.get("ollama")),
         })
     }
 
@@ -448,6 +453,13 @@ impl SettingsManager {
             .unwrap_or_else(|_| "http://127.0.0.1:11434".into())
     }
 
+    pub fn anthropic_model(&self) -> String {
+        self.inner
+            .read()
+            .map(|g| g.anthropic_model.clone())
+            .unwrap_or_else(|_| "claude-3-5-sonnet-20241022".into())
+    }
+
     pub fn decrypt_api_key(&self, slot: &str) -> Result<Option<String>, SettingsError> {
         let inner = self.inner.read().map_err(|_| SettingsError::Crypto("lock poisoned".into()))?;
         let Some(blob) = inner.encrypted_api_keys.get(slot) else {
@@ -479,6 +491,22 @@ impl SettingsManager {
         }
     }
 
+    /// Replace `settings.json` content with defaults (clears encrypted API keys and all prefs fields).
+    pub fn reset_to_install_defaults(&self) -> Result<(), SettingsError> {
+        eprintln!("nova: settings reset_to_install_defaults — restoring defaults");
+        {
+            let mut inner = self
+                .inner
+                .write()
+                .map_err(|_| SettingsError::Crypto("lock poisoned".into()))?;
+            *inner = SettingsFile::default();
+        }
+        self.persist()?;
+        self.sync_public_prefs()?;
+        self.strip_secret_sqlite_prefs()?;
+        Ok(())
+    }
+
     pub fn apply_update(&self, patch: SettingsUpdatePayload) -> Result<(), SettingsError> {
         let mut inner = self.inner.write().map_err(|_| SettingsError::Crypto("lock poisoned".into()))?;
         if let Some(s) = patch.selected_provider {
@@ -502,8 +530,23 @@ impl SettingsManager {
         if let Some(t) = patch.temperature {
             inner.temperature = t.clamp(0.0, 2.0);
         }
-        if let Some(mt) = patch.max_tokens {
-            inner.max_tokens = mt;
+        if let Some(v) = patch.max_tokens {
+            inner.max_tokens = match v {
+                JsonValue::Null => None,
+                JsonValue::Number(n) => {
+                    let u = n.as_u64().ok_or_else(|| {
+                        SettingsError::Crypto("max_tokens must be a non-negative integer".into())
+                    })?;
+                    let u32v = u32::try_from(u)
+                        .map_err(|_| SettingsError::Crypto("max_tokens out of range".into()))?;
+                    Some(u32v)
+                }
+                _ => {
+                    return Err(SettingsError::Crypto(
+                        "max_tokens must be null or a number".into(),
+                    ));
+                }
+            };
         }
         inner.version = SETTINGS_VERSION;
         drop(inner);
@@ -550,6 +593,13 @@ impl SettingsManager {
                     .insert("anthropic".into(), encrypt_aes_gcm(aes_key, t.as_bytes())?);
             }
         }
+        if let Ok(Some(k)) = memory.preference_get("nova.ollama.api_key") {
+            let t = k.trim();
+            if !t.is_empty() {
+                file.encrypted_api_keys
+                    .insert("ollama".into(), encrypt_aes_gcm(aes_key, t.as_bytes())?);
+            }
+        }
         Ok(())
     }
 }
@@ -557,7 +607,7 @@ impl SettingsManager {
 fn normalize_key_slot(provider: &str) -> Result<String, SettingsError> {
     let s = provider.trim().to_lowercase();
     match s.as_str() {
-        "openai" | "anthropic" => Ok(s),
+        "openai" | "anthropic" | "ollama" => Ok(s),
         _ => Err(SettingsError::InvalidKeySlot(provider.to_string())),
     }
 }

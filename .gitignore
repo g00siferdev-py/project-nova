@@ -25,6 +25,9 @@ src-tauri/gen/schemas/
 *.key
 secrets/
 .secrets/
+# Local credential notes (never commit)
+Ollama API key.txt
+.~lock.*
 
 # --- Nova runtime / user data (never commit) ---
 data/

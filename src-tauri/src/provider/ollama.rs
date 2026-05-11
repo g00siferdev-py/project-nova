@@ -16,10 +16,15 @@ use crate::settings::SettingsManager;
 /// Typical context for recent Ollama models (conservative default).
 const DEFAULT_OLLAMA_CTX: u32 = 128_000;
 
+/// `num_predict` upper bound — avoids absurd values from shared presets.
+const OLLAMA_NUM_PREDICT_CAP: u32 = 131_072;
+
 pub struct OllamaProvider {
     client: reqwest::Client,
     base_url: String,
     model: String,
+    /// When set, sends `Authorization: Bearer …` (Ollama Cloud).
+    bearer_token: Option<String>,
 }
 
 impl OllamaProvider {
@@ -30,11 +35,34 @@ impl OllamaProvider {
             client: http.clone(),
             base_url,
             model,
+            bearer_token: None,
         }
+    }
+
+    /// Remote Ollama host at `https://ollama.com` with API key from encrypted settings (`ollama` slot).
+    pub fn from_cloud_settings(settings: &SettingsManager, http: &reqwest::Client) -> Result<Self, ProviderError> {
+        let token = settings
+            .decrypt_api_key("ollama")?
+            .filter(|s| !s.trim().is_empty())
+            .ok_or(ProviderError::MissingApiKey("ollama"))?;
+        let model = settings.ollama_model();
+        Ok(Self {
+            client: http.clone(),
+            base_url: "https://ollama.com".to_string(),
+            model,
+            bearer_token: Some(token),
+        })
     }
 
     fn chat_url(&self) -> String {
         format!("{}/api/chat", self.base_url)
+    }
+
+    fn authorized(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.bearer_token {
+            Some(t) => req.header("Authorization", format!("Bearer {t}")),
+            None => req,
+        }
     }
 
     fn build_messages(request: &CompletionRequest) -> Vec<Value> {
@@ -51,9 +79,10 @@ impl OllamaProvider {
             o.as_object_mut().unwrap().insert("temperature".into(), json!(t));
         }
         if let Some(mt) = request.max_tokens {
+            let capped = mt.min(OLLAMA_NUM_PREDICT_CAP).max(1);
             o.as_object_mut()
                 .unwrap()
-                .insert("num_predict".into(), json!(mt));
+                .insert("num_predict".into(), json!(capped));
         }
         o
     }
@@ -62,12 +91,16 @@ impl OllamaProvider {
 #[async_trait]
 impl LLMProviderEngine for OllamaProvider {
     fn provider_id(&self) -> &'static str {
-        "ollama"
+        if self.bearer_token.is_some() {
+            "ollama_cloud"
+        } else {
+            "ollama"
+        }
     }
 
     fn model_info(&self) -> ModelInfo {
         ModelInfo {
-            provider_id: "ollama".to_string(),
+            provider_id: self.provider_id().to_string(),
             model_id: self.model.clone(),
             context_window_tokens: Some(DEFAULT_OLLAMA_CTX),
         }
@@ -81,9 +114,7 @@ impl LLMProviderEngine for OllamaProvider {
             "options": Self::build_options(request),
         });
         let res = self
-            .client
-            .post(self.chat_url())
-            .json(&body)
+            .authorized(self.client.post(self.chat_url()).json(&body))
             .timeout(Duration::from_secs(300))
             .send()
             .await?
@@ -135,9 +166,7 @@ impl LLMProviderEngine for OllamaProvider {
             "options": Self::build_options(request),
         });
         let res = self
-            .client
-            .post(self.chat_url())
-            .json(&body)
+            .authorized(self.client.post(self.chat_url()).json(&body))
             .timeout(Duration::from_secs(300))
             .send()
             .await?
@@ -193,4 +222,68 @@ impl LLMProviderEngine for OllamaProvider {
             .await;
         Ok(())
     }
+}
+
+/// Lists model names from Ollama Cloud (`GET https://ollama.com/api/tags`) using the encrypted `ollama` API key.
+pub async fn fetch_ollama_cloud_model_tags(
+    http: &reqwest::Client,
+    settings: &SettingsManager,
+) -> Result<Vec<String>, ProviderError> {
+    let token = settings
+        .decrypt_api_key("ollama")?
+        .filter(|s| !s.trim().is_empty())
+        .ok_or(ProviderError::MissingApiKey("ollama"))?;
+    let res = http
+        .get("https://ollama.com/api/tags")
+        .header("Authorization", format!("Bearer {}", token.trim()))
+        .timeout(Duration::from_secs(45))
+        .send()
+        .await?
+        .error_for_status()?;
+    let v: Value = res.json().await?;
+    if let Some(msg) = v["error"].as_str() {
+        return Err(ProviderError::Api(msg.to_string()));
+    }
+    let mut names = Vec::new();
+    if let Some(models) = v["models"].as_array() {
+        for m in models {
+            if let Some(n) = m["name"].as_str() {
+                names.push(n.to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+/// Lists tags from local Ollama `GET {base}/api/tags` (no API key).
+pub async fn fetch_ollama_local_model_tags(
+    http: &reqwest::Client,
+    settings: &SettingsManager,
+) -> Result<Vec<String>, ProviderError> {
+    let base = settings.ollama_base_url();
+    let base = base.trim_end_matches('/');
+    let url = format!("{}/api/tags", base);
+    let res = http
+        .get(&url)
+        .timeout(Duration::from_secs(45))
+        .send()
+        .await?
+        .error_for_status()?;
+    let v: Value = res.json().await?;
+    if let Some(err) = v["error"].as_str() {
+        return Err(ProviderError::Api(err.to_string()));
+    }
+    let mut names = Vec::new();
+    if let Some(models) = v["models"].as_array() {
+        for m in models {
+            if let Some(n) = m["name"].as_str() {
+                names.push(n.to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
 }

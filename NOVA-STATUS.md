@@ -1,6 +1,28 @@
-# Nova — project status
+# Nova — Current Project Summary (Early Alpha)
 
-Nova is a **portable, privacy-first AI companion**: Tauri 2 + React + TypeScript on the desktop, with **local SQLite** as the default store and **no cloud** in core. This file summarizes what exists today and sensible next steps.
+**Nova** is a **portable, privacy-first AI companion** for the desktop: **Tauri 2 + React + TypeScript**, **local SQLite** as the system of record, and **no cloud in core**—you choose **OpenAI** or **Ollama** (with placeholders for more). It is **early alpha**: the main flows work end-to-end, but polish, extra providers, and hardening remain.
+
+**What works today**
+
+- **Streaming chat** with per-thread history, sidebar **rename/delete**, and a **collapsible Settings** rail (**General** + **Companion**).
+- **Memory Anchor**: conversations, messages, **anchors** (with recall / extract), **projects**, **preferences**, and an **enriched startup briefing** wired into the model context.
+- **Intelligent recall**: hybrid **FTS5 + keyword** search, optional **auto-injection** on relevant user turns, and sidebar **memory recall** tools.
+- **Personality isolation** (schema **v6**): threads and anchors scoped by **`personality_id`**; **multi-profile companions** with a live system-prompt preview; **active companion** kept in sync between **UI, Memory Anchor, and `personality.json`** for consistent replies.
+- **Settings**: encrypted **API keys**, provider/model URLs, **temperature** (persisted promptly for generation), **max tokens**, and **data controls**—**memory-only wipe** vs **full factory reset**.
+
+**Technical snapshot**
+
+- **Rust**: `NovaState` (HTTP client, `RwLock` LLM engine, `Arc` memory/settings/personality); **`chat_send_message`** merges **persona + briefing + recall** and streams via Tauri events; **AES-GCM** keys, **Argon2id**, **`.nova_crypto/ikm`**; **`NOVA_DATA_DIR`** / **`NOVA_PORTABLE`** layouts with tuned SQLite pragmas.
+
+**Major recent improvements**
+
+- **Reliable active-personality synchronization** across chat creation, dropdown, IPC, and Rust persona + memory layers.  
+- **Safer data UX**: distinct **“Wipe All Memories”** (SQLite only) and **“Factory Reset”** (settings + personalities + DB).  
+- **Temperature** path fixed so the slider matches what **`chat_send_message`** sends to the provider, with clearer logging.
+
+**Still ahead (high level)**
+
+- Priorities track the **“Next logical steps”** list below—notably **real Anthropic (and more backends)**, **Tauri capability / security tightening**, **portable UX** (e.g. data-dir discovery in-app), and **tests + CI**. Treat that section as the living backlog; not every item is launch-blocking, but those themes are the near-term focus.
 
 ---
 
@@ -59,4 +81,4 @@ Listed in roughly dependency order; **done** items are checked.
 
 ---
 
-*Last updated: reflects chat streaming, MemoryAnchor, providers, encrypted settings, personality system, and sidebar conversation management.*
+*Last updated: includes early-alpha summary, personality sync, dual wipe commands, and temperature/settings fixes.*

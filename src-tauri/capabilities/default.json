@@ -1,7 +1,16 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Default capability for the main Nova window",
+  "description": "Main Nova window: explicit custom IPC allowlist, minimal core plugins (no core:default), and listen/unlisten only for chat streaming (chat:stream-start, chat:stream, chat:stream-error — Tauri core:event has no per-event name ACL; only emit is omitted from the webview).",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "nova-invoke-allowlist",
+    "core:path:default",
+    "core:window:default",
+    "core:webview:default",
+    "core:resources:default",
+    "core:image:default",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
 }

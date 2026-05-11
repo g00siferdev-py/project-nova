@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
@@ -16,10 +16,25 @@ import {
   memoryListAnchors,
   memoryListConversations,
   memoryRenameConversation,
+  memorySetActivePersonality,
   memoryStartupBriefing,
 } from "@/hooks/useNovaMemory";
+import type { PersonalityFile } from "@/lib/personalityPrompt";
 
 const RECENT_LIMIT = 200;
+
+type PersonalityGetResponse = {
+  file: PersonalityFile;
+  generatedSystemPrompt: string;
+};
+
+function companionDisplayName(file: PersonalityFile | null, profileId: string): string {
+  if (!file?.profiles?.length) return "Nova";
+  const p = file.profiles.find((x) => x.id === profileId);
+  if (!p) return "Nova";
+  const n = p.companionName.trim();
+  return n.length > 0 ? n : "Nova";
+}
 
 type ChatStreamStart = { conversationId: string };
 type ChatStreamEvent = { conversationId: string; delta: string; done: boolean };
@@ -42,13 +57,23 @@ export function useChat() {
   const [sending, setSending] = useState(false);
   const [streamAssistant, setStreamAssistant] = useState<StreamAssistantState>(null);
   const [error, setError] = useState<string | null>(null);
+  /** Companion profile id — MemoryAnchor is scoped to this for chats, recall, and threads. */
+  const [activePersonalityId, setActivePersonalityId] = useState("default");
+  /** Last `personality_get` snapshot — used for companion labels and header dropdown. */
+  const [personalityFile, setPersonalityFile] = useState<PersonalityFile | null>(null);
 
   const loadSeq = useRef(0);
   const activeConversationIdRef = useRef<string | null>(null);
+  /** Mirrors `activePersonalityId` for invoke payloads (always read right before IPC). */
+  const activePersonalityIdRef = useRef(activePersonalityId);
 
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
+
+  useEffect(() => {
+    activePersonalityIdRef.current = activePersonalityId;
+  }, [activePersonalityId]);
 
   const refreshConversations = useCallback(async () => {
     try {
@@ -110,21 +135,85 @@ export function useChat() {
     }
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      setListLoading(true);
-      const list = await refreshConversations();
-      if (cancelled) return;
-      setListLoading(false);
-      if (list.length === 0) {
-        setActiveConversationId(null);
-        return;
+  const refreshPersonalityFile = useCallback(async () => {
+    try {
+      const snap = await invoke<PersonalityGetResponse>("personality_get");
+      setPersonalityFile(snap.file);
+    } catch {
+      /* browser / no backend */
+    }
+  }, []);
+
+  const applyActivePersonality = useCallback(
+    async (personalityId: string) => {
+      const id = personalityId.trim() || "default";
+      try {
+        console.info("[nova-chat] applyActivePersonality: awaiting memory_set_active_personality", {
+          personalityId: id,
+        });
+        await memorySetActivePersonality(id);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setError(`Could not activate companion for memory: ${msg}`);
+        return [];
       }
+      activePersonalityIdRef.current = id;
+      loadSeq.current += 1;
+      setActivePersonalityId(id);
+      const list = await refreshConversations();
       setActiveConversationId((prev) => {
         if (prev && list.some((c) => c.id === prev)) return prev;
         return list[0]?.id ?? null;
       });
+      await refreshPersonalityFile();
+      console.info("[nova-chat] applyActivePersonality: memory + UI active personality_id", {
+        personalityId: id,
+      });
+      return list;
+    },
+    [refreshConversations, refreshPersonalityFile],
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setListLoading(true);
+      setError(null);
+      try {
+        const snap = await invoke<PersonalityGetResponse>("personality_get");
+        if (cancelled) return;
+        setPersonalityFile(snap.file);
+        const pid = snap.file.activeProfileId.trim() || "default";
+        try {
+          console.info("[nova-chat] bootstrap: awaiting memory_set_active_personality", {
+            personalityId: pid,
+          });
+          await memorySetActivePersonality(pid);
+        } catch {
+          /* browser preview */
+        }
+        activePersonalityIdRef.current = pid;
+        setActivePersonalityId(pid);
+        const list = await refreshConversations();
+        if (cancelled) return;
+        setListLoading(false);
+        if (list.length === 0) {
+          setActiveConversationId(null);
+          return;
+        }
+        setActiveConversationId((prev) => {
+          if (prev && list.some((c) => c.id === prev)) return prev;
+          return list[0]?.id ?? null;
+        });
+      } catch (e) {
+        if (cancelled) return;
+        const msg =
+          e instanceof Error
+            ? e.message
+            : "Could not load conversations. Run the desktop app with: npm run tauri dev (browser-only preview has no Rust backend).";
+        setError(msg);
+        setListLoading(false);
+      }
     })();
     return () => {
       cancelled = true;
@@ -147,8 +236,18 @@ export function useChat() {
 
   const startNewConversation = useCallback(async () => {
     setError(null);
+    const pid = activePersonalityIdRef.current.trim() || activePersonalityId.trim() || "default";
     try {
-      const id = await memoryCreateConversation("New chat");
+      console.info("[nova-chat] startNewConversation: awaiting memory_set_active_personality before create", {
+        personalityId: pid,
+      });
+      await memorySetActivePersonality(pid);
+      activePersonalityIdRef.current = pid;
+      setActivePersonalityId(pid);
+      const label = companionDisplayName(personalityFile, pid);
+      const title = `New Chat with ${label}`;
+      console.info("[nova-chat] startNewConversation: creating conversation", { personalityId: pid, title });
+      const id = await memoryCreateConversation(title);
       await refreshConversations();
       setActiveConversationId(id);
     } catch (e) {
@@ -156,7 +255,41 @@ export function useChat() {
         e instanceof Error ? e.message : "Could not create conversation (run in Tauri?)";
       setError(msg);
     }
-  }, [refreshConversations]);
+  }, [activePersonalityId, personalityFile, refreshConversations]);
+
+  const companionOptions = useMemo(() => {
+    const base =
+      personalityFile?.profiles?.map((p) => ({
+        id: p.id,
+        companionName: (p.companionName || "").trim() || "Nova",
+        profileName: (p.profileName || "").trim() || p.id,
+      })) ?? [];
+    if (base.length === 0) {
+      return [
+        {
+          id: activePersonalityId,
+          companionName: companionDisplayName(personalityFile, activePersonalityId),
+          profileName: "Default",
+        },
+      ];
+    }
+    if (!base.some((o) => o.id === activePersonalityId)) {
+      return [
+        ...base,
+        {
+          id: activePersonalityId,
+          companionName: companionDisplayName(personalityFile, activePersonalityId),
+          profileName: "Active",
+        },
+      ];
+    }
+    return base;
+  }, [personalityFile, activePersonalityId]);
+
+  const activeCompanionLabel = useMemo(
+    () => companionDisplayName(personalityFile, activePersonalityId),
+    [personalityFile, activePersonalityId],
+  );
 
   const renameConversation = useCallback(
     async (conversationId: string, title: string) => {
@@ -263,9 +396,16 @@ export function useChat() {
           }),
         );
 
+        const personalityIdForSend =
+          activePersonalityIdRef.current.trim() || activePersonalityId.trim() || "default";
+        console.info("[nova-chat] chat_send_message invoke", {
+          personalityId: personalityIdForSend,
+          conversationId: convId,
+        });
         const result = await invoke<ChatSendResult>("chat_send_message", {
           conversationId: convId,
           message: trimmed,
+          personalityId: personalityIdForSend,
         });
 
         const assistantId = `local-a-${Date.now()}`;
@@ -298,6 +438,7 @@ export function useChat() {
     },
     [
       activeConversationId,
+      activePersonalityId,
       sending,
       loadActiveThread,
       refreshConversations,
@@ -308,6 +449,9 @@ export function useChat() {
   return {
     conversations,
     activeConversationId,
+    activePersonalityId,
+    activeCompanionLabel,
+    companionOptions,
     messages,
     briefing,
     anchors,
@@ -323,5 +467,6 @@ export function useChat() {
     extractAnchorsFromChat,
     sendMessage,
     refreshConversations,
+    applyActivePersonality,
   };
 }

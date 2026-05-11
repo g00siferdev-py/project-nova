@@ -10,8 +10,8 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
-import type { StoredAnchor, StoredConversation } from "@/types/chat";
-import { memoryRecallAnchors } from "@/hooks/useNovaMemory";
+import type { MemoryRecallBundle, StoredAnchor, StoredConversation } from "@/types/chat";
+import { memoryRecall } from "@/hooks/useNovaMemory";
 
 type Props = {
   conversations: StoredConversation[];
@@ -55,14 +55,20 @@ export function ConversationSidebar({
 
   const [recallQuery, setRecallQuery] = useState("");
   const [recallBusy, setRecallBusy] = useState(false);
-  const [recallHits, setRecallHits] = useState<StoredAnchor[] | null>(null);
+  const [recallBundle, setRecallBundle] = useState<MemoryRecallBundle | null>(null);
+  const [recallError, setRecallError] = useState<string | null>(null);
+
+  const recentAnchorsByDate = [...anchors].sort(
+    (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt),
+  );
 
   useEffect(() => {
     if (editingId) inputRef.current?.focus();
   }, [editingId]);
 
   useEffect(() => {
-    setRecallHits(null);
+    setRecallBundle(null);
+    setRecallError(null);
     setRecallQuery("");
   }, [activeId]);
 
@@ -88,15 +94,19 @@ export function ConversationSidebar({
   const runRecall = async () => {
     const q = recallQuery.trim();
     if (!q) {
-      setRecallHits(null);
+      setRecallBundle(null);
+      setRecallError(null);
       return;
     }
+    const scope = activeId && activeId.length > 0 ? activeId : null;
     setRecallBusy(true);
+    setRecallError(null);
     try {
-      const hits = await memoryRecallAnchors(q, activeId, 20);
-      setRecallHits(hits);
-    } catch {
-      setRecallHits([]);
+      const bundle = await memoryRecall(q, scope, 16, 8);
+      setRecallBundle(bundle);
+    } catch (e) {
+      setRecallBundle(null);
+      setRecallError(e instanceof Error ? e.message : String(e));
     } finally {
       setRecallBusy(false);
     }
@@ -269,17 +279,22 @@ export function ConversationSidebar({
 
             <div>
               <p className="mb-1 px-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                Thread anchors
+                Recent anchors
               </p>
-              <ul className="max-h-24 space-y-1 overflow-y-auto">
+              <ul className="max-h-28 space-y-1 overflow-y-auto">
                 {anchors.length === 0 ? (
                   <li className="px-1 text-[11px] text-slate-600">No anchors for this thread.</li>
                 ) : (
-                  anchors.slice(0, 12).map((a) => (
+                  recentAnchorsByDate.slice(0, 10).map((a) => (
                     <li
                       key={a.id}
                       className="rounded border border-slate-800/60 bg-slate-950/30 px-2 py-1 text-[11px] text-slate-400"
                     >
+                      <span className="mr-1 text-[9px] text-slate-600">
+                        {new Intl.DateTimeFormat(undefined, { dateStyle: "short" }).format(
+                          new Date(a.createdAt),
+                        )}
+                      </span>
                       <span className="mr-1 rounded bg-slate-800 px-1 text-[9px] uppercase text-indigo-300">
                         {a.anchorType}
                       </span>
@@ -293,7 +308,7 @@ export function ConversationSidebar({
 
             <div>
               <p className="mb-1 px-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                Keyword recall
+                Hybrid recall (FTS + keywords)
               </p>
               <div className="flex gap-1">
                 <input
@@ -302,7 +317,7 @@ export function ConversationSidebar({
                   onKeyDown={(e) => {
                     if (e.key === "Enter") void runRecall();
                   }}
-                  placeholder="Search anchors…"
+                  placeholder="Search anchors & messages…"
                   className="min-w-0 flex-1 rounded-lg border border-slate-800/90 bg-slate-950/50 px-2 py-1 text-[11px] text-slate-200 placeholder:text-slate-600 outline-none focus:border-indigo-500/40"
                 />
                 <button
@@ -319,18 +334,42 @@ export function ConversationSidebar({
                   )}
                 </button>
               </div>
-              {recallHits && recallHits.length > 0 ? (
-                <ul className="mt-2 max-h-20 space-y-1 overflow-y-auto">
-                  {recallHits.map((a) => (
-                    <li
-                      key={a.id}
-                      className="rounded bg-slate-900/50 px-2 py-0.5 text-[10px] text-slate-400"
-                    >
-                      {a.content}
-                    </li>
-                  ))}
-                </ul>
-              ) : recallHits && recallHits.length === 0 ? (
+              {recallError ? (
+                <p className="mt-1 text-[10px] text-amber-400/90">{recallError}</p>
+              ) : null}
+              {recallBundle &&
+              (recallBundle.anchors.length > 0 || recallBundle.messages.length > 0) ? (
+                <div className="mt-2 max-h-36 space-y-2 overflow-y-auto">
+                  {recallBundle.anchors.length > 0 ? (
+                    <ul className="space-y-1">
+                      {recallBundle.anchors.map((a) => (
+                        <li
+                          key={a.id}
+                          className="rounded bg-slate-900/50 px-2 py-0.5 text-[10px] text-slate-400"
+                        >
+                          <span className="text-indigo-400/90">{a.anchorType}</span> · {a.content}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {recallBundle.messages.length > 0 ? (
+                    <ul className="space-y-1 border-t border-slate-800/60 pt-1">
+                      {recallBundle.messages.map((m) => (
+                        <li
+                          key={m.id}
+                          className="rounded bg-slate-900/40 px-2 py-0.5 text-[10px] text-slate-500"
+                        >
+                          <span className="font-medium text-slate-400">{m.role}</span>:{" "}
+                          {m.content.length > 160 ? `${m.content.slice(0, 160)}…` : m.content}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </div>
+              ) : recallBundle &&
+                recallBundle.anchors.length === 0 &&
+                recallBundle.messages.length === 0 &&
+                recallQuery.trim() ? (
                 <p className="mt-1 text-[10px] text-slate-600">No matches.</p>
               ) : null}
             </div>
