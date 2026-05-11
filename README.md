@@ -1,3 +1,5 @@
+<img width="392" height="584" alt="Nova Logo" src="https://github.com/user-attachments/assets/82f4226e-2dbb-45f2-b4f5-e0f7912655af" />
+
 # Nova
 
 **Nova** is a privacy-oriented, portable desktop companion for large language models: chat, long-term memory, and customizable companion personalities in one local-first application.
@@ -12,10 +14,13 @@
 - **Privacy-first** — API keys are protected with strong encryption. Messages and anchors are not sent anywhere except to the provider the installation is configured to use.
 - **Portable layouts** — Optional environment variables (`NOVA_DATA_DIR`, `NOVA_PORTABLE`) support fixed data locations, including removable drives.
 - **Model-agnostic** — Multiple provider backends share a common engine; the interface focuses on choosing providers, models, and generation parameters.
+<img width="1920" height="1053" alt="NovaTest01" src="https://github.com/user-attachments/assets/c6b01618-6ee5-4b0f-9b24-6cc34518e274" />
+
 
 ---
 
 ## Privacy and portability
+<img width="392" height="584" alt="Nova" src="https://github.com/user-attachments/assets/79f68c6e-d067-4736-acce-5b5c779285fa" />
 
 Conversation content, anchors, projects, and companion configuration are stored **locally** (SQLite and JSON under the active data directory). By default, nothing is uploaded to a Nova-operated service.
 
