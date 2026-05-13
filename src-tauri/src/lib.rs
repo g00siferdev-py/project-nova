@@ -17,8 +17,8 @@ mod provider;
 use std::sync::Arc;
 
 use memory::{
-    AnchorType, ConversationMemory, MemoryAnchor, MemoryRecallBundle, MessageRole, StoredAnchor,
-    StoredConversation, StoredMessage, StoredProject, DEFAULT_PERSONALITY_ID,
+    AnchorType, ConversationMemory, MemoryAnchor, MemoryRecallBundle, MessageRole, SqliteProfile,
+    StoredAnchor, StoredConversation, StoredMessage, StoredProject, DEFAULT_PERSONALITY_ID,
 };
 use provider::{
     build_engine, fetch_anthropic_model_ids, fetch_ollama_cloud_model_tags,
@@ -27,6 +27,7 @@ use provider::{
 };
 use personality::{PersonalityFile, PersonalityManager, PersonalitySnapshot};
 use settings::{SettingsManager, SettingsUpdatePayload, SettingsView};
+use serde::Serialize;
 use tauri::State;
 
 // --- App state ----------------------------------------------------------------
@@ -86,6 +87,48 @@ fn parse_anchor_type(s: &str) -> Result<AnchorType, String> {
 #[tauri::command]
 fn app_version() -> String {
     format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+}
+
+/// Where SQLite and `settings.json` live (per machine). Helps debug “works on my other computer”.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppDataPaths {
+    pub data_directory: String,
+    pub database_file: String,
+    /// `desktop` (WAL) vs `portable` (from `NOVA_DATA_DIR` / `NOVA_PORTABLE`).
+    pub sqlite_profile: String,
+    pub nova_data_dir_env: bool,
+    pub nova_portable_env: bool,
+}
+
+#[tauri::command]
+fn app_data_paths() -> Result<AppDataPaths, String> {
+    let database_file = memory::default_db_path().map_err(|e| e.to_string())?;
+    let data_directory = memory::default_data_dir().map_err(|e| e.to_string())?;
+    let sqlite_profile = match memory::sqlite_profile_from_env() {
+        SqliteProfile::Desktop => "desktop",
+        SqliteProfile::Portable => "portable",
+    };
+    let nova_data_dir_env = std::env::var("NOVA_DATA_DIR")
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let nova_portable_env = std::env::var("NOVA_PORTABLE")
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    Ok(AppDataPaths {
+        data_directory: data_directory.to_string_lossy().into_owned(),
+        database_file: database_file.to_string_lossy().into_owned(),
+        sqlite_profile: sqlite_profile.into(),
+        nova_data_dir_env,
+        nova_portable_env,
+    })
+}
+
+/// Opens the resolved data directory in the system file manager (Finder, Explorer, Nautilus, …).
+#[tauri::command]
+fn reveal_data_directory() -> Result<(), String> {
+    let dir = memory::default_data_dir().map_err(|e| e.to_string())?;
+    opener::open(&dir).map_err(|e| format!("open data folder: {e}"))
 }
 
 #[tauri::command]
@@ -443,6 +486,23 @@ fn memory_list_projects(state: State<NovaState>, limit: usize) -> Result<Vec<Sto
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Ok(dir) = memory::default_data_dir() {
+        eprintln!("nova: data directory {}", dir.display());
+    }
+    if let Ok(db) = memory::default_db_path() {
+        eprintln!("nova: sqlite database {}", db.display());
+    }
+    eprintln!(
+        "nova: sqlite profile {:?} (NOVA_DATA_DIR set: {}, NOVA_PORTABLE set: {})",
+        memory::sqlite_profile_from_env(),
+        std::env::var("NOVA_DATA_DIR")
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
+        std::env::var("NOVA_PORTABLE")
+            .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+            .unwrap_or(false),
+    );
+
     let memory: Arc<dyn ConversationMemory + Send + Sync> =
         Arc::new(MemoryAnchor::open_default().expect("failed to open Nova memory database"));
 
@@ -459,6 +519,8 @@ pub fn run() {
         .manage(NovaState::new(memory, settings, personality))
         .invoke_handler(tauri::generate_handler![
             app_version,
+            app_data_paths,
+            reveal_data_directory,
             provider_info,
             provider_list_available,
             ollama_cloud_list_models,

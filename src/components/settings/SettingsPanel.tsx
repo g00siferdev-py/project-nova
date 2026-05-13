@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Cpu, Heart, KeyRound, Loader2, Moon, SlidersHorizontal } from "lucide-react";
+import { Cpu, FolderOpen, Heart, KeyRound, Loader2, Moon, SlidersHorizontal } from "lucide-react";
 import { CompanionPersonalitySection } from "@/components/settings/CompanionPersonalitySection";
 
 type Props = {
@@ -197,6 +197,14 @@ type SettingsTab = "general" | "companion";
 
 type DestructiveModal = "memory" | "factory";
 
+type AppDataPaths = {
+  dataDirectory: string;
+  databaseFile: string;
+  sqliteProfile: string;
+  novaDataDirEnv: boolean;
+  novaPortableEnv: boolean;
+};
+
 export function SettingsPanel({
   open,
   onCompanionActiveProfileChange,
@@ -222,6 +230,8 @@ export function SettingsPanel({
   const [destructiveModal, setDestructiveModal] = useState<DestructiveModal | null>(null);
   const [wipeConfirmInput, setWipeConfirmInput] = useState("");
   const [wiping, setWiping] = useState(false);
+  const [dataPaths, setDataPaths] = useState<AppDataPaths | null>(null);
+  const [revealPathError, setRevealPathError] = useState<string | null>(null);
 
   const loadVersion = useCallback(async () => {
     try {
@@ -251,11 +261,21 @@ export function SettingsPanel({
     }
   }, []);
 
+  const refreshDataPaths = useCallback(async () => {
+    try {
+      const p = await invoke<AppDataPaths>("app_data_paths");
+      setDataPaths(p);
+    } catch {
+      setDataPaths(null);
+    }
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     void refreshSettings();
     void loadProviders();
-  }, [open, refreshSettings, loadProviders]);
+    void refreshDataPaths();
+  }, [open, refreshSettings, loadProviders, refreshDataPaths]);
 
   useEffect(() => {
     if (!open) {
@@ -445,8 +465,8 @@ export function SettingsPanel({
       aria-hidden={!open}
       className={
         open
-          ? "w-80 shrink-0 border-l border-slate-800/80 bg-slate-900/35 shadow-[-12px_0_40px_rgba(0,0,0,0.35)] transition-[width,opacity] duration-200 ease-out"
-          : "w-0 shrink-0 overflow-hidden border-l border-transparent opacity-0 transition-[width,opacity] duration-200 ease-out"
+          ? "h-full min-h-0 w-80 shrink-0 overflow-hidden border-l border-slate-800/80 bg-slate-900/35 shadow-[-12px_0_40px_rgba(0,0,0,0.35)] transition-[width,opacity] duration-200 ease-out"
+          : "h-full min-h-0 w-0 shrink-0 overflow-hidden border-l border-transparent opacity-0 transition-[width,opacity] duration-200 ease-out"
       }
     >
       <div className="flex h-full w-80 flex-col" inert={!open}>
@@ -1001,6 +1021,59 @@ export function SettingsPanel({
               className="w-full rounded-md border border-red-950/80 bg-red-950/40 px-2 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-red-200/90 hover:bg-red-950/70"
             >
               Factory Reset
+            </button>
+          </section>
+
+          <section className="space-y-2 rounded-lg border border-slate-800/80 bg-slate-950/40 p-3">
+            <h3 className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+              Local data paths
+            </h3>
+            <p className="text-xs leading-relaxed text-slate-500">
+              Chats, settings, and <code className="text-slate-400">personality.json</code> live here — not in your git
+              checkout. On Linux the default is under{" "}
+              <code className="text-slate-400">~/.local/share/</code> (XDG data home). Set{" "}
+              <code className="text-slate-400">NOVA_DATA_DIR</code> to pin a visible folder (e.g. inside your project or a
+              synced drive) so every machine uses the same files.
+            </p>
+            {dataPaths ? (
+              <ul className="space-y-1.5 font-mono text-[10px] leading-relaxed text-slate-400 break-all">
+                <li>
+                  <span className="text-slate-600">Data directory · </span>
+                  {dataPaths.dataDirectory}
+                </li>
+                <li>
+                  <span className="text-slate-600">SQLite file · </span>
+                  {dataPaths.databaseFile}
+                </li>
+                <li className="text-slate-500">
+                  Profile: {dataPaths.sqliteProfile}
+                  {dataPaths.novaDataDirEnv ? " · NOVA_DATA_DIR set" : ""}
+                  {dataPaths.novaPortableEnv ? " · NOVA_PORTABLE set" : ""}
+                </li>
+              </ul>
+            ) : (
+              <p className="text-[11px] text-slate-600">Unavailable outside the Tauri desktop shell.</p>
+            )}
+            {revealPathError ? (
+              <p className="text-[11px] text-amber-200/90">{revealPathError}</p>
+            ) : null}
+            <button
+              type="button"
+              disabled={!dataPaths}
+              onClick={() => {
+                setRevealPathError(null);
+                void (async () => {
+                  try {
+                    await invoke("reveal_data_directory");
+                  } catch (e) {
+                    setRevealPathError(e instanceof Error ? e.message : String(e));
+                  }
+                })();
+              }}
+              className="inline-flex items-center gap-2 rounded-lg border border-slate-700/90 bg-slate-900/70 px-3 py-2 text-xs font-medium text-slate-200 transition hover:border-slate-600 hover:bg-slate-800/80 disabled:pointer-events-none disabled:opacity-40"
+            >
+              <FolderOpen className="size-3.5 text-slate-400" aria-hidden />
+              Open data folder in file manager
             </button>
           </section>
 

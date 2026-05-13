@@ -113,7 +113,7 @@ export function ConversationSidebar({
   };
 
   return (
-    <aside className="flex w-80 shrink-0 flex-col border-r border-slate-800/80 bg-slate-900/40">
+    <aside className="flex h-full min-h-0 w-80 shrink-0 flex-col overflow-hidden border-r border-slate-800/80 bg-slate-900/40">
       <div className="flex items-center gap-2 border-b border-slate-800/80 px-4 py-3">
         <img
           src="/nova-icon.svg"
@@ -247,9 +247,16 @@ export function ConversationSidebar({
           </div>
 
           <div className="space-y-2 px-1">
-            <div className="flex items-center gap-1.5 text-[10px] text-slate-500">
-              <Sparkles className="size-3 shrink-0 text-indigo-400" aria-hidden />
-              <span>Raw + curated layers · local only</span>
+            <div className="space-y-1 px-0.5 text-[10px] leading-snug text-slate-500">
+              <p className="flex items-center gap-1.5">
+                <Sparkles className="size-3 shrink-0 text-indigo-400" aria-hidden />
+                <span>Raw + curated layers · local only</span>
+              </p>
+              <p>
+                Chat messages live in the main transcript (SQLite). <strong className="text-slate-400">Recent anchors</strong>{" "}
+                lists extracted snippets only — use <strong className="text-slate-400">Extract raw anchors</strong> or recall
+                search below; they are not auto-filled from every reply.
+              </p>
             </div>
 
             <div className="max-h-36 overflow-y-auto rounded-lg border border-slate-800/80 bg-slate-950/40 px-2.5 py-2">

@@ -116,7 +116,9 @@ export function useChat() {
       setAnchors([]);
       setMessages([]);
     } finally {
-      if (seq === loadSeq.current) setThreadLoading(false);
+      // Always clear: a newer `loadSeq` (e.g. from an in-flight send) may have invalidated this load
+      // while it still held threadLoading true.
+      setThreadLoading(false);
     }
   }, []);
 
@@ -227,6 +229,11 @@ export function useChat() {
       setMessages([]);
       return;
     }
+    // Clear immediately so we never show the previous thread's bubbles while the new id loads
+    // (avoids appending a send onto the wrong transcript).
+    setBriefing("");
+    setAnchors([]);
+    setMessages([]);
     void loadActiveThread(activeConversationId);
   }, [activeConversationId, loadActiveThread]);
 
@@ -353,7 +360,13 @@ export function useChat() {
     async (text: string) => {
       const trimmed = text.trim();
       const convId = activeConversationId;
-      if (!trimmed || !convId || sending) return;
+      if (!trimmed || sending) return;
+      if (!convId) {
+        setError(
+          'No conversation is open. Click "New chat" in the sidebar (or restore your app data folder), then try again.',
+        );
+        return;
+      }
 
       const tempUserId = `local-${Date.now()}`;
       setMessages((prev) => [...prev, { id: tempUserId, role: "user", content: trimmed }]);
@@ -364,6 +377,11 @@ export function useChat() {
       const unlisteners: Array<() => void> = [];
 
       try {
+        // Invalidate any `loadActiveThread` still awaiting IPC for this (often new) thread. Without
+        // this, that load can finish with an empty `get_recent` while `chat_send_message` is still
+        // running and then `setMessages([])` wipes the optimistic transcript ("chat disappeared").
+        loadSeq.current += 1;
+
         unlisteners.push(
           await listen<ChatStreamStart>("chat:stream-start", (event) => {
             if (event.payload.conversationId !== activeConversationIdRef.current) return;

@@ -12,6 +12,8 @@ export type CompanionHeaderOption = {
 type Props = {
   title: string;
   subtitle: string;
+  /** When false, the user must start a thread from the sidebar — sending would otherwise no-op. */
+  hasActiveConversation: boolean;
   messages: ChatMessage[];
   threadLoading: boolean;
   sending: boolean;
@@ -31,6 +33,7 @@ type Props = {
 export function ChatMain({
   title,
   subtitle,
+  hasActiveConversation,
   messages,
   threadLoading,
   sending,
@@ -44,22 +47,24 @@ export function ChatMain({
   companionOptions,
   onCompanionChange,
 }: Props) {
-  const endRef = useRef<HTMLDivElement | null>(null);
+  const scrollAreaRef = useRef<HTMLDivElement | null>(null);
   const [draft, setDraft] = useState("");
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = scrollAreaRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
   }, [messages, threadLoading, streamAssistant]);
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (!draft.trim() || sending || threadLoading) return;
+    if (!draft.trim() || sending || threadLoading || !hasActiveConversation) return;
     onSendMessage(draft);
     setDraft("");
   };
 
   return (
-    <section className="flex min-w-0 flex-1 flex-col bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900/80">
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-gradient-to-b from-slate-950 via-slate-950 to-slate-900/80">
       <header className="flex shrink-0 flex-wrap items-center gap-3 border-b border-slate-800/80 px-4 py-3">
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <Sparkles className="size-4 shrink-0 text-indigo-400" aria-hidden />
@@ -133,7 +138,10 @@ export function ChatMain({
         </div>
       ) : null}
 
-      <div className="relative min-h-0 flex-1 overflow-y-auto px-4 py-4">
+      <div
+        ref={scrollAreaRef}
+        className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden overscroll-contain px-4 py-4"
+      >
         {threadLoading ? (
           <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-2 bg-slate-950/70 backdrop-blur-[2px]">
             <Loader2
@@ -146,8 +154,18 @@ export function ChatMain({
         <div className="mx-auto flex max-w-3xl flex-col gap-4">
           {messages.length === 0 && !threadLoading ? (
             <p className="rounded-xl border border-dashed border-slate-800/90 bg-slate-900/30 px-4 py-8 text-center text-sm text-slate-500">
-              No messages in this conversation yet. Say hello below — everything
-              stays in your local SQLite store.
+              {hasActiveConversation ? (
+                <>
+                  No messages in this conversation yet. Say hello below — everything
+                  stays in your local SQLite store.
+                </>
+              ) : (
+                <>
+                  No chat thread is open. Click <strong className="text-slate-300">New chat</strong>{" "}
+                  in the sidebar to create one — your threads live in local SQLite (not in the git
+                  repo), so a new machine starts empty until you add a chat.
+                </>
+              )}
             </p>
           ) : (
             messages.map((m) => (
@@ -181,7 +199,7 @@ export function ChatMain({
               )}
             </article>
           ) : null}
-          <div ref={endRef} />
+          <div aria-hidden className="h-px shrink-0" />
         </div>
       </div>
 
@@ -201,18 +219,20 @@ export function ChatMain({
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                if (!draft.trim() || sending || threadLoading) return;
+                if (!draft.trim() || sending || threadLoading || !hasActiveConversation) return;
                 onSendMessage(draft);
                 setDraft("");
               }
             }}
-            disabled={threadLoading || sending}
-            placeholder="Message Nova…"
+            disabled={threadLoading || sending || !hasActiveConversation}
+            placeholder={
+              hasActiveConversation ? "Message Nova…" : 'Click "New chat" in the sidebar first…'
+            }
             className="min-h-[2.75rem] flex-1 resize-none rounded-xl border border-slate-800/90 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600 shadow-inner outline-none ring-0 transition focus:border-indigo-500/50 focus:ring-2 focus:ring-indigo-500/30 disabled:opacity-50"
           />
           <button
             type="submit"
-            disabled={threadLoading || sending || !draft.trim()}
+            disabled={threadLoading || sending || !draft.trim() || !hasActiveConversation}
             className="inline-flex shrink-0 items-center justify-center gap-2 self-end rounded-xl bg-indigo-500 px-3 py-2 text-white shadow-sm shadow-indigo-500/25 transition hover:bg-indigo-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 disabled:pointer-events-none disabled:opacity-40"
             aria-label="Send message"
           >

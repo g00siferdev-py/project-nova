@@ -4,6 +4,8 @@ identifier = "nova-invoke-allowlist"
 description = "Custom invoke commands used by the Nova UI (see generate_handler! in lib.rs)."
 commands.allow = [
   "app_version",
+  "app_data_paths",
+  "reveal_data_directory",
   "provider_info",
   "provider_list_available",
   "ollama_cloud_list_models",

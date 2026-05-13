@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   ChevronDown,
   CopyPlus,
+  FileJson,
+  FileText,
   Heart,
   Plus,
   Save,
@@ -18,6 +20,11 @@ import {
   type PersonalityFile,
   type PersonalityProfile,
 } from "@/lib/personalityPrompt";
+import {
+  appendImportedProfiles,
+  openclawFilesToProfile,
+  parsePersonalityJson,
+} from "@/lib/personalityImport";
 
 type Snapshot = {
   file: PersonalityFile;
@@ -56,6 +63,8 @@ export function CompanionPersonalitySection({
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveMode, setSaveMode] = useState<"changes" | "new" | null>(null);
+  const jsonInputRef = useRef<HTMLInputElement>(null);
+  const openclawInputRef = useRef<HTMLInputElement>(null);
 
   const syncMemoryProfile = useCallback(
     (profileId: string) => {
@@ -153,6 +162,69 @@ export function CompanionPersonalitySection({
     } finally {
       setSaving(false);
       setSaveMode(null);
+    }
+  };
+
+  const readFileText = (f: File) =>
+    new Promise<string>((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result ?? ""));
+      r.onerror = () => reject(new Error("Could not read file."));
+      r.readAsText(f);
+    });
+
+  const onPickJson = () => jsonInputRef.current?.click();
+
+  const onJsonSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const f = input.files?.[0];
+    input.value = "";
+    if (!f || !file) return;
+    setLoadErr(null);
+    try {
+      const text = await readFileText(f);
+      const parsed = parsePersonalityJson(text);
+      if (parsed.kind === "file") {
+        const ok = window.confirm(
+          "Replace the entire personality file with this JSON? All current profiles in this form will be replaced (save to disk still required).",
+        );
+        if (!ok) return;
+        setFile(parsed.file);
+        syncMemoryProfile(parsed.file.activeProfileId);
+        return;
+      }
+      const ok = window.confirm(
+        `Add ${parsed.profiles.length} profile(s) from this JSON to your existing list? IDs will be adjusted if they clash.`,
+      );
+      if (!ok) return;
+      const next = appendImportedProfiles(file, parsed.profiles);
+      setFile(next);
+      syncMemoryProfile(next.activeProfileId);
+    } catch (err) {
+      setLoadErr(String(err));
+    }
+  };
+
+  const onPickOpenclaw = () => openclawInputRef.current?.click();
+
+  const onOpenclawSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const list = input.files;
+    input.value = "";
+    if (!list?.length || !file) return;
+    setLoadErr(null);
+    try {
+      const parts: { fileName: string; text: string }[] = [];
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i]!;
+        parts.push({ fileName: f.name, text: await readFileText(f) });
+      }
+      const profile = openclawFilesToProfile(parts);
+      const next = appendImportedProfiles(file, [profile]);
+      setFile(next);
+      syncMemoryProfile(next.activeProfileId);
+    } catch (err) {
+      setLoadErr(String(err));
     }
   };
 
@@ -281,6 +353,57 @@ export function CompanionPersonalitySection({
                 Companion personality · saved as <span className="font-mono">personality.json</span> in your data
                 folder. The generated prompt is sent with every message as the first system layer.
               </p>
+            </div>
+          </div>
+
+          <div className="rounded-lg border border-amber-500/25 bg-amber-950/15 p-3">
+            <p className="text-[10px] font-semibold uppercase tracking-wide text-amber-200/90">
+              Import from file
+            </p>
+            <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+              <span className="font-medium text-slate-300">Nova JSON</span> — full{" "}
+              <span className="font-mono">personality.json</span>, a <span className="font-mono">profiles</span> array,
+              or one profile object. <span className="font-medium text-slate-300">OpenClaw</span> — select{" "}
+              <span className="font-mono">SOUL.md</span>, <span className="font-mono">IDENTITY.md</span>,{" "}
+              <span className="font-mono">USER.md</span>, <span className="font-mono">JOURNAL.md</span>,{" "}
+              <span className="font-mono">MEMORY.md</span>, <span className="font-mono">TOOLS.md</span> together (any
+              subset); we map them into Nova fields and add one new profile. Then use{" "}
+              <span className="text-indigo-300">Save changes</span> to persist.
+            </p>
+            <input
+              ref={jsonInputRef}
+              type="file"
+              accept=".json,application/json"
+              className="sr-only"
+              aria-hidden
+              onChange={(ev) => void onJsonSelected(ev)}
+            />
+            <input
+              ref={openclawInputRef}
+              type="file"
+              accept=".md,.markdown,text/markdown"
+              multiple
+              className="sr-only"
+              aria-hidden
+              onChange={(ev) => void onOpenclawSelected(ev)}
+            />
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={onPickJson}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-700/50 bg-slate-900/80 px-3 py-2 text-xs font-medium text-amber-100 hover:bg-slate-800"
+              >
+                <FileJson className="size-3.5 shrink-0" aria-hidden />
+                Import Nova JSON…
+              </button>
+              <button
+                type="button"
+                onClick={onPickOpenclaw}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-700/50 bg-slate-900/80 px-3 py-2 text-xs font-medium text-amber-100 hover:bg-slate-800"
+              >
+                <FileText className="size-3.5 shrink-0" aria-hidden />
+                Import OpenClaw markdown…
+              </button>
             </div>
           </div>
 

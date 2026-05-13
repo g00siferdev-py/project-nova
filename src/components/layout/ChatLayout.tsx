@@ -1,8 +1,17 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useChat } from "@/hooks/useChat";
 import { ChatMain } from "@/components/chat/ChatMain";
 import { ConversationSidebar } from "@/components/sidebar/ConversationSidebar";
 import { SettingsPanel } from "@/components/settings/SettingsPanel";
+
+/** Subset of `settings_get` for the main-window provider hint (no secrets). */
+type SettingsForHint = {
+  selectedProvider: string;
+  hasOpenaiApiKey: boolean;
+  hasAnthropicApiKey: boolean;
+  hasOllamaApiKey: boolean;
+};
 
 function truncate(s: string, max: number): string {
   const t = s.trim().replace(/\s+/g, " ");
@@ -12,6 +21,54 @@ function truncate(s: string, max: number): string {
 
 export function ChatLayout() {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [backendHint, setBackendHint] = useState<string | null>(null);
+  const prevSettingsOpen = useRef(false);
+
+  const loadBackendHint = useCallback(async () => {
+    try {
+      const s = await invoke<SettingsForHint>("settings_get");
+      const p = (s.selectedProvider ?? "placeholder").trim().toLowerCase();
+      if (p === "placeholder") {
+        setBackendHint(
+          "This install is using the offline placeholder model — nothing is sent to OpenAI, Anthropic, or Ollama. Open Settings → Provider and pick a live backend (and API key if required). Settings live in your Nova data folder, not the git repo, so each computer starts with its own copy.",
+        );
+        return;
+      }
+      if (p === "openai" && !s.hasOpenaiApiKey) {
+        setBackendHint(
+          "OpenAI is selected but no API key is stored on this machine. Add a key under Settings → OpenAI.",
+        );
+        return;
+      }
+      if (p === "anthropic" && !s.hasAnthropicApiKey) {
+        setBackendHint(
+          "Anthropic is selected but no API key is stored on this machine. Add a key under Settings → Anthropic.",
+        );
+        return;
+      }
+      if (p === "ollama_cloud" && !s.hasOllamaApiKey) {
+        setBackendHint(
+          "Ollama Cloud is selected but no API key is stored. Add a key under Settings, or switch to local Ollama.",
+        );
+        return;
+      }
+      setBackendHint(null);
+    } catch {
+      setBackendHint(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadBackendHint();
+  }, [loadBackendHint]);
+
+  useEffect(() => {
+    if (prevSettingsOpen.current && !settingsOpen) {
+      void loadBackendHint();
+    }
+    prevSettingsOpen.current = settingsOpen;
+  }, [settingsOpen, loadBackendHint]);
+
   const {
     conversations,
     activeConversationId,
@@ -61,24 +118,35 @@ export function ChatLayout() {
         anchors={anchors}
         onExtractAnchors={() => void extractAnchorsFromChat()}
       />
-      <ChatMain
-        title={title}
-        subtitle={subtitle}
-        messages={messages}
-        threadLoading={threadLoading}
-        sending={sending}
-        streamAssistant={streamAssistant}
-        error={error}
-        settingsOpen={settingsOpen}
-        onToggleSettings={() => setSettingsOpen((v) => !v)}
-        onSendMessage={(text) => void sendMessage(text)}
-        activeCompanionProfileId={activePersonalityId}
-        activeCompanionLabel={activeCompanionLabel}
-        companionOptions={companionOptions}
-        onCompanionChange={async (profileId) => {
-          await applyActivePersonality(profileId);
-        }}
-      />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        {backendHint ? (
+          <div
+            role="status"
+            className="shrink-0 border-b border-sky-800/50 bg-sky-950/50 px-4 py-2 text-xs leading-relaxed text-sky-100/95"
+          >
+            {backendHint}
+          </div>
+        ) : null}
+        <ChatMain
+          title={title}
+          subtitle={subtitle}
+          hasActiveConversation={activeConversationId != null}
+          messages={messages}
+          threadLoading={threadLoading}
+          sending={sending}
+          streamAssistant={streamAssistant}
+          error={error}
+          settingsOpen={settingsOpen}
+          onToggleSettings={() => setSettingsOpen((v) => !v)}
+          onSendMessage={(text) => void sendMessage(text)}
+          activeCompanionProfileId={activePersonalityId}
+          activeCompanionLabel={activeCompanionLabel}
+          companionOptions={companionOptions}
+          onCompanionChange={async (profileId) => {
+            await applyActivePersonality(profileId);
+          }}
+        />
+      </div>
       <SettingsPanel
         open={settingsOpen}
         chatActiveProfileId={activePersonalityId}

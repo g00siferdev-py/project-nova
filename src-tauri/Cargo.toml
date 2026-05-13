@@ -24,6 +24,7 @@ futures-util = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
 directories = "5"
+opener = "0.8"
 uuid = { version = "1", features = ["v4"] }
 ring = "0.17"
 argon2 = "0.5"

@@ -6,10 +6,14 @@
   html,
   body,
   #root {
-    @apply h-full antialiased;
+    @apply h-full min-h-0 antialiased;
   }
 
   body {
-    @apply bg-slate-950 text-slate-100;
+    @apply overflow-hidden bg-slate-950 text-slate-100;
+  }
+
+  #root {
+    @apply min-h-0;
   }
 }
