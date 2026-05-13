@@ -12,6 +12,10 @@
 //! `projects`, and `preferences`. **Hybrid recall** combines FTS5 full-text
 //! ranking with keyword `LIKE` and optional message hits; [`embedding`] is still
 //! reserved for future true semantic ranking when query vectors exist.
+//!
+//! **Storage:** SQLite `TEXT` columns (e.g. `anchors.content`) are not limited to
+//! 255 characters. Any fixed cap you see in **raw anchor extraction** is from
+//! heuristics in [`MemoryAnchor::create_anchor_from_conversation`], not the schema.
 
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -279,6 +283,54 @@ const BRIEFING_SNIPPET_CHARS: usize = 280;
 const BRIEFING_MAX_ANCHORS: usize = 12;
 const BRIEFING_MAX_PROJECTS: usize = 8;
 const BRIEFING_MAX_PREFS: usize = 12;
+
+/// Minimum user-snippet length (**Unicode characters**) for heuristic raw-anchor extraction.
+const ANCHOR_EXTRACT_MIN_CHARS: usize = 12;
+/// Maximum characters per raw anchor from extraction (SQLite itself has no such cap).
+const ANCHOR_EXTRACT_MAX_CHARS: usize = 16_384;
+
+/// Split `s` into substrings of at most `max_chars` Unicode scalars (final chunk may be shorter).
+fn chunk_text_by_max_chars(s: &str, max_chars: usize) -> Vec<String> {
+    if max_chars == 0 {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    let mut buf = String::new();
+    let mut count = 0usize;
+    for ch in s.chars() {
+        if count >= max_chars {
+            out.push(std::mem::take(&mut buf));
+            count = 0;
+        }
+        buf.push(ch);
+        count += 1;
+    }
+    if !buf.is_empty() {
+        out.push(buf);
+    }
+    out
+}
+
+/// Turn recent user text into anchor-sized candidates (sentence-ish splits + long-chunk folding).
+fn anchor_candidates_from_user_message(content: &str) -> Vec<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    for part in content.split(|c| matches!(c, '\n' | '.' | '?' | '!' | ';')) {
+        let s = part.trim();
+        if s.chars().count() < ANCHOR_EXTRACT_MIN_CHARS {
+            continue;
+        }
+        if s.chars().count() <= ANCHOR_EXTRACT_MAX_CHARS {
+            candidates.push(s.to_string());
+        } else {
+            for chunk in chunk_text_by_max_chars(s, ANCHOR_EXTRACT_MAX_CHARS) {
+                if chunk.chars().count() >= ANCHOR_EXTRACT_MIN_CHARS {
+                    candidates.push(chunk);
+                }
+            }
+        }
+    }
+    candidates
+}
 
 fn table_exists(conn: &Connection, name: &str) -> Result<bool, rusqlite::Error> {
     let n: i64 = conn.query_row(
@@ -1602,18 +1654,10 @@ impl ConversationMemory for MemoryAnchor {
         let mut candidates: Vec<String> = Vec::new();
 
         for m in recent.iter().filter(|m| m.role == MessageRole::User) {
-            for part in m
-                .content
-                .split(|c| matches!(c, '\n' | '.' | '?' | '!' | ';'))
-            {
-                let s = part.trim();
-                if s.len() >= 12 && s.len() <= 512 {
-                    candidates.push(s.to_string());
-                }
-            }
+            candidates.extend(anchor_candidates_from_user_message(&m.content));
         }
 
-        candidates.sort_by(|a, b| b.len().cmp(&a.len()));
+        candidates.sort_by(|a, b| b.chars().count().cmp(&a.chars().count()));
         candidates.dedup();
 
         let mut ids = Vec::new();
@@ -1797,4 +1841,36 @@ pub fn default_db_path() -> Result<PathBuf, MemoryError> {
         directories::ProjectDirs::from("app", "Nova", "Nova").ok_or(MemoryError::NoDataDir)?;
     std::fs::create_dir_all(dirs.data_dir())?;
     Ok(dirs.data_dir().join("nova_memory.sqlite"))
+}
+
+#[cfg(test)]
+mod anchor_storage_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_anchor_content_roundtrips_long_unicode() {
+        let dir = std::env::temp_dir().join(format!("nova_mem_anchor_test_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("m.sqlite");
+        let mem =
+            MemoryAnchor::new_with_profile(&path, SqliteProfile::Portable).expect("open db");
+        let conv_id = ConversationMemory::create_conversation(&mem, "anchor-len-test").expect("conv");
+        let body = "η".repeat(4000);
+        let aid = ConversationMemory::create_anchor(&mem, Some(&conv_id), AnchorType::Fact, &body, 2)
+            .expect("insert anchor");
+        let list = ConversationMemory::list_anchors_for_thread(&mem, &conv_id, 50).expect("list");
+        let got = list.iter().find(|a| a.id == aid).expect("row");
+        assert_eq!(got.content, body);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn anchor_extraction_splits_long_clause_by_chars_not_512_bytes() {
+        let sentence = "word ".repeat(200); // >512 bytes, many short “words”
+        let c = anchor_candidates_from_user_message(&(sentence.clone() + "."));
+        assert!(
+            c.iter().any(|s| s.chars().count() > 512),
+            "expected a chunk >512 chars, got {c:?}"
+        );
+    }
 }
