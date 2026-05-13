@@ -72,8 +72,14 @@ pub struct SettingsFile {
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     pub max_tokens: Option<u32>,
+    #[serde(default = "default_agent_web_tools")]
+    pub agent_web_tools_enabled: bool,
     #[serde(default)]
     pub encrypted_api_keys: HashMap<String, EncryptedApiKeyBlob>,
+}
+
+fn default_agent_web_tools() -> bool {
+    false
 }
 
 fn default_version() -> u32 {
@@ -96,6 +102,7 @@ impl Default for SettingsFile {
             anthropic_model: "claude-3-5-sonnet-20241022".into(),
             temperature: 0.7,
             max_tokens: None,
+            agent_web_tools_enabled: false,
             encrypted_api_keys: HashMap::new(),
         }
     }
@@ -113,6 +120,7 @@ pub struct SettingsView {
     pub anthropic_model: String,
     pub temperature: f32,
     pub max_tokens: Option<u32>,
+    pub agent_web_tools_enabled: bool,
     pub has_openai_api_key: bool,
     pub has_anthropic_api_key: bool,
     pub has_ollama_api_key: bool,
@@ -131,6 +139,7 @@ pub struct SettingsUpdatePayload {
     /// Omitted = no change. JSON `null` = clear cap. Number = set cap (`Option<Option<u32>>`
     /// cannot represent “present null” from JS; use [`JsonValue`]).
     pub max_tokens: Option<JsonValue>,
+    pub agent_web_tools_enabled: Option<bool>,
 }
 
 // --- Crypto ------------------------------------------------------------------
@@ -398,6 +407,7 @@ impl SettingsManager {
             anthropic_model: inner.anthropic_model.clone(),
             temperature: inner.temperature,
             max_tokens: inner.max_tokens,
+            agent_web_tools_enabled: inner.agent_web_tools_enabled,
             has_openai_api_key: can_decrypt_api_blob(&self.aes_key, inner.encrypted_api_keys.get("openai")),
             has_anthropic_api_key: can_decrypt_api_blob(
                 &self.aes_key,
@@ -416,6 +426,13 @@ impl SettingsManager {
 
     pub fn max_tokens(&self) -> Option<u32> {
         self.inner.read().ok().and_then(|g| g.max_tokens)
+    }
+
+    pub fn agent_web_tools_enabled(&self) -> bool {
+        self.inner
+            .read()
+            .map(|g| g.agent_web_tools_enabled)
+            .unwrap_or(false)
     }
 
     pub fn selected_provider(&self) -> String {
@@ -547,6 +564,9 @@ impl SettingsManager {
                     ));
                 }
             };
+        }
+        if let Some(b) = patch.agent_web_tools_enabled {
+            inner.agent_web_tools_enabled = b;
         }
         inner.version = SETTINGS_VERSION;
         drop(inner);

@@ -1,12 +1,35 @@
 //! Shared request/response types for LLM backends (OpenAI-shaped + Ollama).
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// One turn in the chat transcript (OpenAI-style roles: system, user, assistant, tool).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatTurn {
     pub role: String,
     pub content: String,
+    /// When set, OpenAI `/v1/chat/completions` uses this JSON object as the message (must include `role`). Plain `content` is ignored for that turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openai_message: Option<Value>,
+    /// When set, Ollama `/api/chat` uses this object instead of `{ role, content }` for that turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_message: Option<Value>,
+    /// When set, Anthropic Messages API uses this object as one `messages[]` entry (must include `role` and `content` per API).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_message: Option<Value>,
+}
+
+impl ChatTurn {
+    #[must_use]
+    pub fn text(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            openai_message: None,
+            ollama_message: None,
+            anthropic_message: None,
+        }
+    }
 }
 
 /// OpenAI-style tool definition (JSON Schema parameters).

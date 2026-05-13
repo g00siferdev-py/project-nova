@@ -1,12 +1,13 @@
 //! Chat send pipeline: MemoryAnchor context, settings-backed LLM, streamed assistant reply.
 
 use serde::Serialize;
+use serde_json::json;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::memory::{ConversationMemory, MemoryRecallBundle, MessageRole, DEFAULT_PERSONALITY_ID};
 use crate::provider::{
-    build_engine, ChatSendResult, ChatTurn, CompletionRequest, LLMProviderEngine, ProviderError,
-    StreamChunk, ToolCall,
+    build_engine, ChatSendResult, ChatTurn, CompletionRequest, CompletionResponse, LLMProviderEngine,
+    ProviderError, StreamChunk, ToolCall,
 };
 use crate::NovaState;
 
@@ -80,6 +81,250 @@ fn format_recall_for_prompt(bundle: &MemoryRecallBundle, max_chars: usize) -> St
     } else {
         out
     }
+}
+
+fn emit_synthetic_stream_deltas(app: &AppHandle, conversation_id: &str, text: &str) {
+    const CHUNK_CHARS: usize = 72;
+    let mut buf = String::new();
+    let mut n = 0usize;
+    for ch in text.chars() {
+        buf.push(ch);
+        n += 1;
+        if n >= CHUNK_CHARS {
+            let _ = app.emit(
+                "chat:stream",
+                ChatStreamEvent {
+                    conversation_id: conversation_id.to_string(),
+                    delta: std::mem::take(&mut buf),
+                    done: false,
+                },
+            );
+            n = 0;
+        }
+    }
+    if !buf.is_empty() {
+        let _ = app.emit(
+            "chat:stream",
+            ChatStreamEvent {
+                conversation_id: conversation_id.to_string(),
+                delta: buf,
+                done: false,
+            },
+        );
+    }
+    let _ = app.emit(
+        "chat:stream",
+        ChatStreamEvent {
+            conversation_id: conversation_id.to_string(),
+            delta: String::new(),
+            done: true,
+        },
+    );
+}
+
+fn assistant_openai_message_with_tool_calls(resp: &CompletionResponse) -> serde_json::Value {
+    let content_val = if resp.content.trim().is_empty() {
+        serde_json::Value::Null
+    } else {
+        json!(resp.content)
+    };
+    let tool_calls_json: Vec<serde_json::Value> = resp
+        .tool_calls
+        .iter()
+        .map(|tc| {
+            json!({
+                "id": &tc.id,
+                "type": "function",
+                "function": {
+                    "name": &tc.name,
+                    "arguments": &tc.arguments_json
+                }
+            })
+        })
+        .collect();
+    json!({
+        "role": "assistant",
+        "content": content_val,
+        "tool_calls": tool_calls_json,
+    })
+}
+
+fn ollama_assistant_with_tool_calls(resp: &CompletionResponse) -> serde_json::Value {
+    let tool_calls: Vec<serde_json::Value> = resp
+        .tool_calls
+        .iter()
+        .enumerate()
+        .map(|(i, tc)| {
+            let args: serde_json::Value =
+                serde_json::from_str(&tc.arguments_json).unwrap_or(json!({}));
+            json!({
+                "type": "function",
+                "function": {
+                    "index": i,
+                    "name": &tc.name,
+                    "arguments": args
+                }
+            })
+        })
+        .collect();
+    json!({
+        "role": "assistant",
+        "content": resp.content.clone(),
+        "tool_calls": tool_calls,
+    })
+}
+
+fn anthropic_assistant_with_tool_calls(resp: &CompletionResponse) -> serde_json::Value {
+    let mut blocks = Vec::new();
+    if !resp.content.trim().is_empty() {
+        blocks.push(json!({"type": "text", "text": resp.content}));
+    }
+    for tc in &resp.tool_calls {
+        let input: serde_json::Value =
+            serde_json::from_str(&tc.arguments_json).unwrap_or(json!({}));
+        blocks.push(json!({
+            "type": "tool_use",
+            "id": &tc.id,
+            "name": &tc.name,
+            "input": input
+        }));
+    }
+    json!({ "role": "assistant", "content": blocks })
+}
+
+fn anthropic_user_tool_results(tool_calls: &[ToolCall], bodies: &[String]) -> serde_json::Value {
+    let blocks: Vec<serde_json::Value> = tool_calls
+        .iter()
+        .zip(bodies.iter())
+        .map(|(tc, body)| {
+            json!({
+                "type": "tool_result",
+                "tool_use_id": &tc.id,
+                "content": body
+            })
+        })
+        .collect();
+    json!({ "role": "user", "content": blocks })
+}
+
+#[derive(Clone, Copy)]
+enum AgentWebToolBackend {
+    OpenAI,
+    Ollama,
+    Anthropic,
+}
+
+fn web_tool_backend_for_provider(provider_id: &str) -> Option<AgentWebToolBackend> {
+    match provider_id {
+        "openai" => Some(AgentWebToolBackend::OpenAI),
+        "ollama" | "ollama_cloud" => Some(AgentWebToolBackend::Ollama),
+        "anthropic" => Some(AgentWebToolBackend::Anthropic),
+        _ => None,
+    }
+}
+
+/// Non-streaming completion with `web_search` / `fetch_url` tool rounds (OpenAI, Ollama, Anthropic).
+async fn agent_complete_with_web_tools(
+    engine: &(dyn LLMProviderEngine + Send + Sync),
+    http: &reqwest::Client,
+    mut messages: Vec<ChatTurn>,
+    max_tokens: Option<u32>,
+    temperature: f32,
+    backend: AgentWebToolBackend,
+) -> Result<String, ProviderError> {
+    const MAX_ROUNDS: usize = 8;
+    let tools = crate::agent_tools::builtin_tool_definitions();
+    for _ in 0..MAX_ROUNDS {
+        let req = CompletionRequest {
+            messages: messages.clone(),
+            tools: Some(tools.clone()),
+            max_tokens,
+            temperature: Some(temperature),
+        };
+        let resp = engine.complete(&req).await?;
+        if resp.tool_calls.is_empty() {
+            return Ok(resp.content);
+        }
+
+        match backend {
+            AgentWebToolBackend::OpenAI => {
+                messages.push(ChatTurn {
+                    role: "assistant".into(),
+                    content: resp.content.clone(),
+                    openai_message: Some(assistant_openai_message_with_tool_calls(&resp)),
+                    ollama_message: None,
+                    anthropic_message: None,
+                });
+                for tc in &resp.tool_calls {
+                    let body = crate::agent_tools::run_builtin_tool(http, &tc.name, &tc.arguments_json)
+                        .await
+                        .unwrap_or_else(|e| format!("Tool error: {e}"));
+                    messages.push(ChatTurn {
+                        role: "tool".into(),
+                        content: body.clone(),
+                        openai_message: Some(json!({
+                            "role": "tool",
+                            "tool_call_id": &tc.id,
+                            "content": body,
+                        })),
+                        ollama_message: None,
+                        anthropic_message: None,
+                    });
+                }
+            }
+            AgentWebToolBackend::Ollama => {
+                messages.push(ChatTurn {
+                    role: "assistant".into(),
+                    content: resp.content.clone(),
+                    openai_message: None,
+                    ollama_message: Some(ollama_assistant_with_tool_calls(&resp)),
+                    anthropic_message: None,
+                });
+                for tc in &resp.tool_calls {
+                    let body = crate::agent_tools::run_builtin_tool(http, &tc.name, &tc.arguments_json)
+                        .await
+                        .unwrap_or_else(|e| format!("Tool error: {e}"));
+                    messages.push(ChatTurn {
+                        role: "tool".into(),
+                        content: body.clone(),
+                        openai_message: None,
+                        ollama_message: Some(json!({
+                            "role": "tool",
+                            "tool_name": &tc.name,
+                            "content": body,
+                        })),
+                        anthropic_message: None,
+                    });
+                }
+            }
+            AgentWebToolBackend::Anthropic => {
+                messages.push(ChatTurn {
+                    role: "assistant".into(),
+                    content: resp.content.clone(),
+                    openai_message: None,
+                    ollama_message: None,
+                    anthropic_message: Some(anthropic_assistant_with_tool_calls(&resp)),
+                });
+                let mut bodies: Vec<String> = Vec::with_capacity(resp.tool_calls.len());
+                for tc in &resp.tool_calls {
+                    let body = crate::agent_tools::run_builtin_tool(http, &tc.name, &tc.arguments_json)
+                        .await
+                        .unwrap_or_else(|e| format!("Tool error: {e}"));
+                    bodies.push(body);
+                }
+                messages.push(ChatTurn {
+                    role: "user".into(),
+                    content: bodies.join("\n---\n"),
+                    openai_message: None,
+                    ollama_message: None,
+                    anthropic_message: Some(anthropic_user_tool_results(&resp.tool_calls, &bodies)),
+                });
+            }
+        }
+    }
+    Err(ProviderError::Api(
+        "Agent stopped after maximum tool rounds — try a narrower question.".into(),
+    ))
 }
 
 #[derive(Serialize, Clone)]
@@ -213,19 +458,13 @@ pub async fn chat_send_message(
     );
 
     let mut messages: Vec<ChatTurn> = Vec::with_capacity(recent.len() + 1);
-    messages.push(ChatTurn {
-        role: "system".into(),
-        content: system_content,
-    });
+    messages.push(ChatTurn::text("system", system_content));
     for m in recent {
         let role = match m.role {
             MessageRole::User => "user",
             MessageRole::Assistant => "assistant",
         };
-        messages.push(ChatTurn {
-            role: role.into(),
-            content: m.content,
-        });
+        messages.push(ChatTurn::text(role, m.content));
     }
 
     let configured = state.settings.max_tokens();
@@ -236,79 +475,115 @@ pub async fn chat_send_message(
 
     let temperature = state.settings.temperature();
     eprintln!("nova: chat_send_message temperature={temperature}");
-    let req = CompletionRequest {
-        messages,
-        tools: None,
-        max_tokens,
-        temperature: Some(temperature),
-    };
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<StreamChunk, ProviderError>>(64);
-    let engine_clone = engine.clone();
-    let send_task = tokio::spawn(async move { engine_clone.stream(&req, tx).await });
+    let agent_web_tool_backend = state
+        .settings
+        .agent_web_tools_enabled()
+        .then(|| web_tool_backend_for_provider(engine.provider_id()))
+        .flatten();
+    if agent_web_tool_backend.is_some() {
+        eprintln!(
+            "nova: chat agent web tools enabled (provider={}) — non-streaming tool loop + synthetic stream",
+            engine.provider_id()
+        );
+    }
 
     let mut full = String::new();
-    let mut saw_done = false;
 
-    while let Some(item) = rx.recv().await {
-        match item {
-            Ok(chunk) => {
-                if !chunk.delta.is_empty() {
-                    full.push_str(&chunk.delta);
-                    let _ = app.emit(
-                        "chat:stream",
-                        ChatStreamEvent {
-                            conversation_id: conversation_id.clone(),
-                            delta: chunk.delta,
-                            done: false,
-                        },
-                    );
-                }
-                if chunk.done {
-                    saw_done = true;
-                    let _ = app.emit(
-                        "chat:stream",
-                        ChatStreamEvent {
-                            conversation_id: conversation_id.clone(),
-                            delta: String::new(),
-                            done: true,
-                        },
-                    );
-                    break;
-                }
+    if let Some(backend) = agent_web_tool_backend {
+        match agent_complete_with_web_tools(
+            engine.as_ref(),
+            &state.http,
+            messages,
+            max_tokens,
+            temperature,
+            backend,
+        )
+        .await
+        {
+            Ok(text) => {
+                full = text;
+                emit_synthetic_stream_deltas(&app, &conversation_id, &full);
             }
             Err(e) => {
                 let msg = e.to_string();
                 let _ = app.emit("chat:stream-error", msg.clone());
-                send_task.abort();
                 return Err(msg);
             }
         }
-    }
+    } else {
+        let req = CompletionRequest {
+            messages,
+            tools: None,
+            max_tokens,
+            temperature: Some(temperature),
+        };
 
-    match send_task.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            let msg = e.to_string();
-            let _ = app.emit("chat:stream-error", msg.clone());
-            return Err(msg);
-        }
-        Err(j) => {
-            let msg = j.to_string();
-            let _ = app.emit("chat:stream-error", msg.clone());
-            return Err(msg);
-        }
-    }
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Result<StreamChunk, ProviderError>>(64);
+        let engine_clone = engine.clone();
+        let send_task = tokio::spawn(async move { engine_clone.stream(&req, tx).await });
 
-    if !saw_done {
-        let _ = app.emit(
-            "chat:stream",
-            ChatStreamEvent {
-                conversation_id: conversation_id.clone(),
-                delta: String::new(),
-                done: true,
-            },
-        );
+        let mut saw_done = false;
+        while let Some(item) = rx.recv().await {
+            match item {
+                Ok(chunk) => {
+                    if !chunk.delta.is_empty() {
+                        full.push_str(&chunk.delta);
+                        let _ = app.emit(
+                            "chat:stream",
+                            ChatStreamEvent {
+                                conversation_id: conversation_id.clone(),
+                                delta: chunk.delta,
+                                done: false,
+                            },
+                        );
+                    }
+                    if chunk.done {
+                        saw_done = true;
+                        let _ = app.emit(
+                            "chat:stream",
+                            ChatStreamEvent {
+                                conversation_id: conversation_id.clone(),
+                                delta: String::new(),
+                                done: true,
+                            },
+                        );
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    let _ = app.emit("chat:stream-error", msg.clone());
+                    send_task.abort();
+                    return Err(msg);
+                }
+            }
+        }
+
+        match send_task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                let msg = e.to_string();
+                let _ = app.emit("chat:stream-error", msg.clone());
+                return Err(msg);
+            }
+            Err(j) => {
+                let msg = j.to_string();
+                let _ = app.emit("chat:stream-error", msg.clone());
+                return Err(msg);
+            }
+        }
+
+        if !saw_done {
+            let _ = app.emit(
+                "chat:stream",
+                ChatStreamEvent {
+                    conversation_id: conversation_id.clone(),
+                    delta: String::new(),
+                    done: true,
+                },
+            );
+        }
     }
 
     let mut reply = full;

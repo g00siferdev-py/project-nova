@@ -67,7 +67,13 @@ impl OpenAIProvider {
     fn build_body(&self, request: &CompletionRequest, stream: bool) -> Value {
         let mut body = json!({
             "model": self.model,
-            "messages": request.messages.iter().map(|m| json!({"role": m.role, "content": m.content})).collect::<Vec<_>>(),
+            "messages": request.messages.iter().map(|m| {
+                if let Some(ref raw) = m.openai_message {
+                    raw.clone()
+                } else {
+                    json!({"role": &m.role, "content": &m.content})
+                }
+            }).collect::<Vec<_>>(),
             "stream": stream,
         });
         if let Some(t) = request.temperature {

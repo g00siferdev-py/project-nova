@@ -47,6 +47,7 @@ impl AnthropicProvider {
     }
 
     /// Split OpenAI-shaped transcript into Anthropic `system` + `messages` (no system role in messages).
+    /// Turns with [`ChatTurn::anthropic_message`](super::types::ChatTurn::anthropic_message) are passed through verbatim.
     fn split_system_and_messages(request: &CompletionRequest) -> (Option<String>, Vec<Value>) {
         let mut system_parts: Vec<String> = Vec::new();
         let mut messages: Vec<Value> = Vec::new();
@@ -58,10 +59,13 @@ impl AnthropicProvider {
                 }
                 continue;
             }
-            if role != "user" && role != "assistant" {
+            if let Some(ref raw) = m.anthropic_message {
+                messages.push(raw.clone());
                 continue;
             }
-            messages.push(json!({ "role": role, "content": m.content }));
+            if role == "user" || role == "assistant" {
+                messages.push(json!({ "role": role, "content": m.content }));
+            }
         }
         let system = if system_parts.is_empty() {
             None

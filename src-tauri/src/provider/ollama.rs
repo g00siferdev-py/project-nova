@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use super::engine::LLMProviderEngine;
 use super::error::ProviderError;
 use super::types::{
-    CompletionRequest, CompletionResponse, ModelInfo, StreamChunk, ToolCall,
+    CompletionRequest, CompletionResponse, ModelInfo, StreamChunk, ToolCall, ToolDefinition,
 };
 use crate::settings::SettingsManager;
 
@@ -69,8 +69,40 @@ impl OllamaProvider {
         request
             .messages
             .iter()
-            .map(|m| json!({"role": m.role, "content": m.content}))
+            .map(|m| {
+                if let Some(ref raw) = m.ollama_message {
+                    raw.clone()
+                } else {
+                    json!({"role": m.role, "content": m.content})
+                }
+            })
             .collect()
+    }
+
+    fn build_tools_json(tools: &[ToolDefinition]) -> Vec<Value> {
+        tools
+            .iter()
+            .map(|t| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": &t.name,
+                        "description": &t.description,
+                        "parameters": &t.parameters,
+                    }
+                })
+            })
+            .collect()
+    }
+
+    fn attach_tools(body: &mut Value, tools: Option<&Vec<ToolDefinition>>) {
+        let Some(list) = tools else { return };
+        if list.is_empty() {
+            return;
+        }
+        body.as_object_mut()
+            .unwrap()
+            .insert("tools".into(), json!(Self::build_tools_json(list)));
     }
 
     fn build_options(request: &CompletionRequest) -> Value {
@@ -107,12 +139,13 @@ impl LLMProviderEngine for OllamaProvider {
     }
 
     async fn complete(&self, request: &CompletionRequest) -> Result<CompletionResponse, ProviderError> {
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": Self::build_messages(request),
             "stream": false,
             "options": Self::build_options(request),
         });
+        Self::attach_tools(&mut body, request.tools.as_ref());
         let res = self
             .authorized(self.client.post(self.chat_url()).json(&body))
             .timeout(Duration::from_secs(300))
@@ -131,8 +164,12 @@ impl LLMProviderEngine for OllamaProvider {
 
         let mut tool_calls = Vec::new();
         if let Some(tc) = v["message"]["tool_calls"].as_array() {
-            for t in tc {
-                let id = t["id"].as_str().unwrap_or("").to_string();
+            for (i, t) in tc.iter().enumerate() {
+                let id = t["id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .unwrap_or_else(|| format!("ollama_tool_{i}"));
                 let name = t["function"]["name"].as_str().unwrap_or("").to_string();
                 let args = t["function"]["arguments"]
                     .as_str()
@@ -159,12 +196,13 @@ impl LLMProviderEngine for OllamaProvider {
         request: &CompletionRequest,
         tx: tokio::sync::mpsc::Sender<Result<StreamChunk, ProviderError>>,
     ) -> Result<(), ProviderError> {
-        let body = json!({
+        let mut body = json!({
             "model": self.model,
             "messages": Self::build_messages(request),
             "stream": true,
             "options": Self::build_options(request),
         });
+        Self::attach_tools(&mut body, request.tools.as_ref());
         let res = self
             .authorized(self.client.post(self.chat_url()).json(&body))
             .timeout(Duration::from_secs(300))

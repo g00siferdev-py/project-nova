@@ -8,6 +8,7 @@
 //! Application entry for mobile builds is [`run`]. Desktop [`main`] in
 //! `main.rs` delegates here so the same setup runs everywhere.
 
+mod agent_tools;
 mod chat;
 mod memory;
 mod personality;
