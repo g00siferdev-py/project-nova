@@ -15,6 +15,7 @@ mod personality;
 mod settings;
 mod provider;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use memory::{
@@ -39,6 +40,8 @@ pub struct NovaState {
     pub(crate) memory: Arc<dyn ConversationMemory + Send + Sync>,
     pub(crate) settings: Arc<SettingsManager>,
     pub(crate) personality: Arc<PersonalityManager>,
+    /// Canonical agent workspace (`{data_dir}/workspace`). Created at startup; tools only touch paths inside it.
+    pub(crate) workspace_root: PathBuf,
 }
 
 impl NovaState {
@@ -47,6 +50,7 @@ impl NovaState {
         memory: Arc<dyn ConversationMemory + Send + Sync>,
         settings: Arc<SettingsManager>,
         personality: Arc<PersonalityManager>,
+        workspace_root: PathBuf,
     ) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(format!("Nova/{}", env!("CARGO_PKG_VERSION")))
@@ -67,6 +71,7 @@ impl NovaState {
             memory,
             settings,
             personality,
+            workspace_root,
         }
     }
 }
@@ -96,6 +101,8 @@ fn app_version() -> String {
 pub struct AppDataPaths {
     pub data_directory: String,
     pub database_file: String,
+    /// Agent read/write sandbox (`{dataDirectory}/workspace`).
+    pub workspace_directory: String,
     /// `desktop` (WAL) vs `portable` (from `NOVA_DATA_DIR` / `NOVA_PORTABLE`).
     pub sqlite_profile: String,
     pub nova_data_dir_env: bool,
@@ -116,9 +123,11 @@ fn app_data_paths() -> Result<AppDataPaths, String> {
     let nova_portable_env = std::env::var("NOVA_PORTABLE")
         .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let workspace_directory = data_directory.join("workspace");
     Ok(AppDataPaths {
         data_directory: data_directory.to_string_lossy().into_owned(),
         database_file: database_file.to_string_lossy().into_owned(),
+        workspace_directory: workspace_directory.to_string_lossy().into_owned(),
         sqlite_profile: sqlite_profile.into(),
         nova_data_dir_env,
         nova_portable_env,
@@ -516,8 +525,23 @@ pub fn run() {
         PersonalityManager::load(&data_dir).expect("failed to load personality store"),
     );
 
+    let mut workspace_root = data_dir.join("workspace");
+    if let Err(e) = std::fs::create_dir_all(&workspace_root) {
+        eprintln!(
+            "nova: warning: could not create agent workspace directory {}: {e}",
+            workspace_root.display()
+        );
+    }
+    workspace_root = std::fs::canonicalize(&workspace_root).unwrap_or(workspace_root);
+    eprintln!("nova: agent workspace directory {}", workspace_root.display());
+
     tauri::Builder::default()
-        .manage(NovaState::new(memory, settings, personality))
+        .manage(NovaState::new(
+            memory,
+            settings,
+            personality,
+            workspace_root,
+        ))
         .invoke_handler(tauri::generate_handler![
             app_version,
             app_data_paths,

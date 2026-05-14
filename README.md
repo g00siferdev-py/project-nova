@@ -2,17 +2,17 @@
 
 # Nova
 
-**Nova** is a privacy-oriented, portable desktop companion for large language models: chat, long-term memory, optional **web search and URL fetch** tools for the assistant (when enabled), and customizable companion personalities in one local-first application.
+**Nova** is a privacy-oriented, portable desktop companion for large language models: chat, long-term memory, optional **agent tools** (web search, URL fetch, HTTPS requests with custom headers, and a sandboxed **workspace** folder for files—each opt-in), and customizable companion personalities in one local-first application.
 
 ---
 
 ## Key features
 
 - **Memory Anchor** — Conversations, messages, anchors, projects, and preferences stay in a local SQLite database. Startup briefings and hybrid recall help each thread stay grounded in what matters.
-- **Optional agent tools** — When turned on in Settings, supported providers can call built-in **`web_search`** (DuckDuckGo) and **`fetch_url`** (size-capped, SSRF-guarded HTTP(S)) from the chat pipeline. Off by default; traffic goes only to the endpoints those tools use plus your configured LLM provider.
+- **Optional agent tools** — When turned on in Settings, supported providers (OpenAI, Ollama, Anthropic) can use a non-streaming tool loop. **Web tools** (off by default): **`web_search`** (DuckDuckGo) and **`fetch_url`** (size-capped, SSRF-guarded HTTP/HTTPS). **`http_request`** (same toggle): HTTPS-only requests with custom headers and body (for authenticated JSON APIs); local/private hosts blocked. **Workspace tools** (separate toggle, off by default): read/write/list UTF-8 files only under **`{data directory}/workspace`**, created at app startup—relative paths, no `..`, symlink-safe jail. Traffic goes to the URLs and hosts you (or the model) choose plus your configured LLM provider.
 - **Customizable personalities** — Companion profiles shape tone and behavior, with a live system-prompt preview before the next reply.
 - **Local-first** — Chat history and memory remain on the device. Nova does not operate a central cloud service for conversations or memory.
-- **Privacy-first** — API keys are stored encrypted on disk. Messages and anchors are not sent anywhere except to the provider you configure (and to DuckDuckGo / target URLs only if agent web tools are enabled).
+- **Privacy-first** — API keys are stored encrypted on disk. Messages and anchors are not sent anywhere except to the provider you configure (and to DuckDuckGo / target URLs / your HTTPS APIs / local workspace files only when the corresponding agent tools are enabled).
 - **Portable layouts** — Optional environment variables (`NOVA_DATA_DIR`, `NOVA_PORTABLE`) support fixed data locations, including removable drives.
 - **Model-agnostic** — OpenAI, Ollama (local and cloud), Anthropic, or an offline placeholder; shared engine interface for chat and tools.
 
@@ -93,7 +93,7 @@ Chat, streaming, SQLite memory, and settings **require** the Tauri shell (not th
 npm run tauri dev
 ```
 
-The first launch creates local data under the default app data directory (or under `NOVA_DATA_DIR` / portable layout if you set those — see below).
+The first launch creates local data under the default app data directory (or under `NOVA_DATA_DIR` / portable layout if you set those — see below). A subdirectory **`workspace/`** is created there for optional agent file tools (empty until you or the model add files).
 
 ### 5. Production build (optional)
 
@@ -106,10 +106,11 @@ Installable artifacts appear under `src-tauri/target/release/bundle/` (format de
 ### 6. First-time configuration in the app
 
 1. Open **Settings → General**, choose a **provider** (e.g. OpenAI or Ollama), pick a **model**, and save your **API key** if that provider requires one.
-2. Optional: enable **Allow web tools for the assistant** if you want the model to use **`web_search`** and **`fetch_url`** (OpenAI, Ollama, and Anthropic when that path is active). Requests are made from your machine; local/private URLs are blocked for `fetch_url`.
-3. Open or create a conversation from the sidebar, send a message, and confirm replies stream into the thread.
-4. Use **Settings → Companion** to edit personality profiles; switch the active profile from the chat UI when needed.
-5. Use the sidebar **Memory Anchor** briefing, **Extract raw anchors**, and **Hybrid recall** to manage long-term snippets for the active thread.
+2. Optional: enable **Allow web tools for the assistant** so the model can use **`web_search`**, **`fetch_url`**, and **`http_request`** (OpenAI, Ollama, and Anthropic when that path is active). Requests run on your machine; `fetch_url` and `http_request` block local/private hosts; **`http_request` is HTTPS-only** (good for `Authorization: Bearer …` APIs—pass JSON bodies as strings and set `Content-Type` in headers when needed).
+3. Optional: enable **Allow workspace file tools for the assistant** for **`workspace_*`** tools only under your data directory’s **`workspace`** folder (path is shown in Settings when data paths load). Off by default; higher risk than read-only web fetch—enable only if you trust the model with files in that folder.
+4. Open or create a conversation from the sidebar, send a message, and confirm replies stream into the thread.
+5. Use **Settings → Companion** to edit personality profiles; switch the active profile from the chat UI when needed.
+6. Use the sidebar **Memory Anchor** briefing, **Extract raw anchors**, and **Hybrid recall** to manage long-term snippets for the active thread.
 
 ---
 
@@ -117,7 +118,7 @@ Installable artifacts appear under `src-tauri/target/release/bundle/` (format de
 
 | Variable | Purpose |
 |----------|---------|
-| `NOVA_DATA_DIR` | Absolute path to the folder where `nova_memory.sqlite`, `settings.json`, and `personality.json` should live. Useful for a dedicated disk or synced folder. |
+| `NOVA_DATA_DIR` | Absolute path to the folder where `nova_memory.sqlite`, `settings.json`, `personality.json`, and the agent **`workspace/`** subdirectory should live. Useful for a dedicated disk or synced folder. |
 | `NOVA_PORTABLE=1` | Store data in a `data/` directory next to the application executable (portable/USB layout). |
 | *(unset)* | Use the OS default application data location. |
 
@@ -186,7 +187,7 @@ Conversation content, anchors, projects, and companion configuration are stored 
 
 ## Project status
 
-Nova is in **early alpha**: core flows are usable; polish, more automated tests, and continued security review remain on the roadmap. Feedback and contributions are welcome.
+Nova is in **early alpha**: core flows are usable; polish, more automated tests, and continued security review remain on the roadmap. See [`CHANGELOG.md`](./CHANGELOG.md) for a running list of notable changes (including unreleased work on `main`). Feedback and contributions are welcome.
 
 ---
 

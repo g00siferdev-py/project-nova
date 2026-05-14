@@ -74,11 +74,17 @@ pub struct SettingsFile {
     pub max_tokens: Option<u32>,
     #[serde(default = "default_agent_web_tools")]
     pub agent_web_tools_enabled: bool,
+    #[serde(default = "default_agent_workspace")]
+    pub agent_workspace_enabled: bool,
     #[serde(default)]
     pub encrypted_api_keys: HashMap<String, EncryptedApiKeyBlob>,
 }
 
 fn default_agent_web_tools() -> bool {
+    false
+}
+
+fn default_agent_workspace() -> bool {
     false
 }
 
@@ -103,6 +109,7 @@ impl Default for SettingsFile {
             temperature: 0.7,
             max_tokens: None,
             agent_web_tools_enabled: false,
+            agent_workspace_enabled: false,
             encrypted_api_keys: HashMap::new(),
         }
     }
@@ -121,6 +128,7 @@ pub struct SettingsView {
     pub temperature: f32,
     pub max_tokens: Option<u32>,
     pub agent_web_tools_enabled: bool,
+    pub agent_workspace_enabled: bool,
     pub has_openai_api_key: bool,
     pub has_anthropic_api_key: bool,
     pub has_ollama_api_key: bool,
@@ -140,6 +148,7 @@ pub struct SettingsUpdatePayload {
     /// cannot represent “present null” from JS; use [`JsonValue`]).
     pub max_tokens: Option<JsonValue>,
     pub agent_web_tools_enabled: Option<bool>,
+    pub agent_workspace_enabled: Option<bool>,
 }
 
 // --- Crypto ------------------------------------------------------------------
@@ -408,6 +417,7 @@ impl SettingsManager {
             temperature: inner.temperature,
             max_tokens: inner.max_tokens,
             agent_web_tools_enabled: inner.agent_web_tools_enabled,
+            agent_workspace_enabled: inner.agent_workspace_enabled,
             has_openai_api_key: can_decrypt_api_blob(&self.aes_key, inner.encrypted_api_keys.get("openai")),
             has_anthropic_api_key: can_decrypt_api_blob(
                 &self.aes_key,
@@ -432,6 +442,13 @@ impl SettingsManager {
         self.inner
             .read()
             .map(|g| g.agent_web_tools_enabled)
+            .unwrap_or(false)
+    }
+
+    pub fn agent_workspace_enabled(&self) -> bool {
+        self.inner
+            .read()
+            .map(|g| g.agent_workspace_enabled)
             .unwrap_or(false)
     }
 
@@ -567,6 +584,9 @@ impl SettingsManager {
         }
         if let Some(b) = patch.agent_web_tools_enabled {
             inner.agent_web_tools_enabled = b;
+        }
+        if let Some(b) = patch.agent_workspace_enabled {
+            inner.agent_workspace_enabled = b;
         }
         inner.version = SETTINGS_VERSION;
         drop(inner);

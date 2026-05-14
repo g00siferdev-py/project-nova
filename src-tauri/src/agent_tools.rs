@@ -1,10 +1,18 @@
-//! Built-in tools for the chat agent: web search (DuckDuckGo) and HTTP(S) page fetch.
-//! Used with provider tool-calling (OpenAI Chat Completions, Ollama `/api/chat`, Anthropic Messages). URLs are restricted to reduce SSRF.
+//! Built-in tools for the chat agent: web search (DuckDuckGo), HTTP(S) fetch, HTTPS `http_request`
+//! (custom headers / methods for authenticated APIs), and optional sandboxed read/write under the
+//! app workspace directory.
+//! Used with provider tool-calling (OpenAI Chat Completions, Ollama `/api/chat`, Anthropic Messages).
+//! URLs are restricted to reduce SSRF; workspace paths are jailed to `{data_dir}/workspace`.
 
+use std::collections::BTreeMap;
 use std::net::IpAddr;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::Duration;
 
 use futures_util::StreamExt;
+use reqwest::header::{HeaderName, HeaderValue, USER_AGENT};
+use reqwest::{Method, StatusCode};
 use serde_json::{json, Value};
 use url::Url;
 
@@ -12,6 +20,14 @@ use crate::provider::{ProviderError, ToolDefinition};
 
 const FETCH_MAX_BYTES: usize = 900_000;
 const FETCH_TIMEOUT_SECS: u64 = 25;
+const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
+const HTTP_REQUEST_MAX_REQ_BODY_BYTES: usize = 512_000;
+const HTTP_REQUEST_MAX_RESPONSE_BYTES: usize = 900_000;
+const HTTP_REQUEST_RESPONSE_BODY_MAX_CHARS: usize = 96_000;
+const HTTP_REQUEST_MAX_HEADER_COUNT: usize = 40;
+const HTTP_REQUEST_MAX_HEADER_NAME_LEN: usize = 256;
+const HTTP_REQUEST_MAX_HEADER_VALUE_LEN: usize = 16_384;
+const NOVA_HTTP_REQUEST_UA: &str = concat!("Nova/", env!("CARGO_PKG_VERSION"), " (+https://github.com/)");
 const SEARCH_QUERY_MAX: usize = 400;
 /// DuckDuckGo HTML results page (SERP) — used when the instant-answer JSON API has no snippets.
 const DDG_HTML_SERP_MAX_BYTES: usize = 512_000;
@@ -46,7 +62,225 @@ pub fn builtin_tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["url"]
             }),
         },
+        ToolDefinition {
+            name: "http_request".into(),
+            description: Some(
+                "Perform an HTTPS request with optional method, custom headers, and body. Returns JSON: { status, statusText, headers, body }. Use for authenticated APIs (e.g. Authorization: Bearer <token>). Only https:// URLs; private/local hosts are blocked (SSRF guard). CR/LF not allowed in header names or values.".into(),
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "HTTPS URL (https:// only)" },
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method",
+                        "enum": ["GET", "POST", "PUT", "DELETE", "PATCH"]
+                    },
+                    "headers": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "Optional header map (string values only), e.g. Authorization Bearer"
+                    },
+                    "body": { "type": "string", "description": "Optional request body (e.g. JSON as a string)" }
+                },
+                "required": ["url"]
+            }),
+        },
     ]
+}
+
+const WORKSPACE_READ_MAX_BYTES: usize = 900_000;
+const WORKSPACE_WRITE_MAX_BYTES: usize = 900_000;
+const WORKSPACE_LIST_MAX_ENTRIES: usize = 250;
+const WORKSPACE_REL_PATH_MAX: usize = 2048;
+
+/// Tools offered when agent workspace access is enabled (paths are relative to the workspace root).
+pub fn workspace_tool_definitions() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "workspace_read_file".into(),
+            description: Some(
+                "Read a UTF-8 text file inside the Nova workspace. Path is relative to the workspace root (forward slashes, no ..).".into(),
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative file path under the workspace" },
+                    "max_bytes": { "type": "integer", "description": "Optional read cap (bytes); defaults to a safe maximum" }
+                },
+                "required": ["path"]
+            }),
+        },
+        ToolDefinition {
+            name: "workspace_write_file".into(),
+            description: Some(
+                "Create or overwrite a UTF-8 text file in the workspace. Parent directories are created as needed. Path is relative (no ..).".into(),
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative file path under the workspace" },
+                    "content": { "type": "string", "description": "Full file contents (UTF-8 text)" }
+                },
+                "required": ["path", "content"]
+            }),
+        },
+        ToolDefinition {
+            name: "workspace_list_directory".into(),
+            description: Some(
+                "List immediate children of a directory inside the workspace (non-recursive). Path is relative; use \".\" for the workspace root.".into(),
+            ),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Relative directory path (default \".\")" }
+                },
+                "required": []
+            }),
+        },
+    ]
+}
+
+/// Build `workspace_root/rel` with `rel` sanitized (no `..`, no absolute paths, forward slashes only).
+pub fn resolve_workspace_subpath(workspace_root: &Path, rel: &str) -> Result<PathBuf, ProviderError> {
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return Err(tool_err("path is empty"));
+    }
+    if rel.len() > WORKSPACE_REL_PATH_MAX {
+        return Err(tool_err("path too long"));
+    }
+    if rel.starts_with('/') {
+        return Err(tool_err("path must be relative (no leading /)"));
+    }
+    if rel.contains('\\') {
+        return Err(tool_err("path must use forward slashes only"));
+    }
+    let mut out = workspace_root.to_path_buf();
+    for seg in rel.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return Err(tool_err("path must not contain '..' segments"));
+        }
+        out.push(seg);
+    }
+    Ok(out)
+}
+
+fn workspace_root_canonical(workspace_root: &Path) -> Result<PathBuf, ProviderError> {
+    std::fs::canonicalize(workspace_root).map_err(|e| tool_err(format!("workspace root: {e}")))
+}
+
+/// Verifies `path` (built under the workspace) does not escape via symlinks.
+fn assert_path_in_workspace(workspace_root: &Path, path: &Path) -> Result<(), ProviderError> {
+    let root_canon = workspace_root_canonical(workspace_root)?;
+    if path.exists() {
+        let p = std::fs::canonicalize(path).map_err(|e| tool_err(format!("path: {e}")))?;
+        if !p.starts_with(&root_canon) {
+            return Err(tool_err("path resolves outside the workspace"));
+        }
+        return Ok(());
+    }
+    let mut anc = path.to_path_buf();
+    loop {
+        if anc.as_os_str().is_empty() {
+            return Err(tool_err("invalid path"));
+        }
+        if anc.exists() {
+            let a = std::fs::canonicalize(&anc).map_err(|e| tool_err(format!("path: {e}")))?;
+            if !a.starts_with(&root_canon) {
+                return Err(tool_err("path resolves outside the workspace"));
+            }
+            return Ok(());
+        }
+        if anc == workspace_root {
+            return Ok(());
+        }
+        if !anc.pop() {
+            return Err(tool_err("path escapes the workspace"));
+        }
+    }
+}
+
+fn workspace_read_file(workspace_root: &Path, rel: &str, max_bytes: Option<u64>) -> Result<String, ProviderError> {
+    let path = resolve_workspace_subpath(workspace_root, rel)?;
+    assert_path_in_workspace(workspace_root, &path)?;
+    let cap = max_bytes
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(WORKSPACE_READ_MAX_BYTES)
+        .min(WORKSPACE_READ_MAX_BYTES);
+    let meta = std::fs::metadata(&path).map_err(|e| tool_err(format!("read_file: {e}")))?;
+    if !meta.is_file() {
+        return Err(tool_err("path is not a regular file"));
+    }
+    let len = meta.len() as usize;
+    if len > cap {
+        return Err(tool_err(format!(
+            "file is {} bytes (max {})",
+            meta.len(),
+            cap
+        )));
+    }
+    let bytes = std::fs::read(&path).map_err(|e| tool_err(format!("read_file: {e}")))?;
+    let text = String::from_utf8(bytes).map_err(|_| tool_err("file is not valid UTF-8"))?;
+    Ok(text)
+}
+
+fn workspace_write_file(workspace_root: &Path, rel: &str, content: &str) -> Result<String, ProviderError> {
+    let path = resolve_workspace_subpath(workspace_root, rel)?;
+    if content.as_bytes().len() > WORKSPACE_WRITE_MAX_BYTES {
+        return Err(tool_err(format!(
+            "content exceeds {} bytes",
+            WORKSPACE_WRITE_MAX_BYTES
+        )));
+    }
+    if let Some(parent) = path.parent() {
+        assert_path_in_workspace(workspace_root, parent)?;
+        std::fs::create_dir_all(parent).map_err(|e| tool_err(format!("create_dir_all: {e}")))?;
+    }
+    assert_path_in_workspace(workspace_root, &path)?;
+    std::fs::write(&path, content.as_bytes()).map_err(|e| tool_err(format!("write_file: {e}")))?;
+    Ok(format!("Wrote {} bytes to {}", content.as_bytes().len(), rel.trim()))
+}
+
+fn workspace_list_directory(workspace_root: &Path, rel: &str) -> Result<String, ProviderError> {
+    let rel = if rel.trim().is_empty() { "." } else { rel };
+    let path = resolve_workspace_subpath(workspace_root, rel)?;
+    assert_path_in_workspace(workspace_root, &path)?;
+    let meta = std::fs::metadata(&path).map_err(|e| tool_err(format!("list_directory: {e}")))?;
+    if !meta.is_dir() {
+        return Err(tool_err("path is not a directory"));
+    }
+    let read = std::fs::read_dir(&path).map_err(|e| tool_err(format!("list_directory: {e}")))?;
+    let mut lines: Vec<String> = Vec::new();
+    for (i, ent) in read.enumerate() {
+        if i >= WORKSPACE_LIST_MAX_ENTRIES {
+            lines.push(format!("… (listing truncated after {WORKSPACE_LIST_MAX_ENTRIES} entries)"));
+            break;
+        }
+        let ent = ent.map_err(|e| tool_err(format!("list_directory: {e}")))?;
+        let ty = ent
+            .file_type()
+            .map(|t| {
+                if t.is_dir() {
+                    "dir"
+                } else if t.is_symlink() {
+                    "symlink"
+                } else {
+                    "file"
+                }
+            })
+            .unwrap_or("?");
+        let name = ent.file_name().to_string_lossy().into_owned();
+        lines.push(format!("{ty}\t{name}"));
+    }
+    if lines.is_empty() {
+        Ok("(empty directory)".into())
+    } else {
+        Ok(lines.join("\n"))
+    }
 }
 
 fn tool_err(msg: impl Into<String>) -> ProviderError {
@@ -96,6 +330,244 @@ pub fn validate_fetch_url(raw: &str) -> Result<Url, ProviderError> {
         return Err(tool_err("URL host is not allowed (private or local addresses blocked)"));
     }
     Ok(u)
+}
+
+/// `https:` only, same host rules as [`validate_fetch_url`] (SSRF guard).
+fn validate_agent_https_url(raw: &str) -> Result<Url, ProviderError> {
+    let raw = raw.trim();
+    if raw.len() > 2048 {
+        return Err(tool_err("URL too long (max 2048 characters)"));
+    }
+    let u = Url::parse(raw).map_err(|e| tool_err(format!("invalid URL: {e}")))?;
+    match u.scheme() {
+        "https" => {}
+        "http" => {
+            return Err(tool_err(
+                "http_request only allows https:// URLs (plain http is blocked)",
+            ));
+        }
+        s => return Err(tool_err(format!("unsupported URL scheme: {s} (only https)"))),
+    }
+    if u.username() != "" || u.password().is_some() {
+        return Err(tool_err("URLs with embedded credentials are not allowed; put tokens in headers instead"));
+    }
+    let host = u
+        .host_str()
+        .ok_or_else(|| tool_err("URL must include a host"))?;
+    if blocked_host(host) {
+        return Err(tool_err("URL host is not allowed (private or local addresses blocked)"));
+    }
+    Ok(u)
+}
+
+/// Parse `headers` object into validated HTTP headers (rejects header injection / invalid tokens).
+fn parse_http_request_headers(headers_val: Option<&Value>) -> Result<Vec<(HeaderName, HeaderValue)>, ProviderError> {
+    let Some(v) = headers_val else {
+        return Ok(Vec::new());
+    };
+    let Some(obj) = v.as_object() else {
+        return Err(tool_err("headers must be a JSON object of string keys to string values"));
+    };
+    if obj.len() > HTTP_REQUEST_MAX_HEADER_COUNT {
+        return Err(tool_err(format!(
+            "too many headers (max {HTTP_REQUEST_MAX_HEADER_COUNT})"
+        )));
+    }
+    let mut out = Vec::with_capacity(obj.len());
+    for (k, val) in obj {
+        let name = k.trim();
+        if name.is_empty() {
+            return Err(tool_err("header names must not be empty"));
+        }
+        if name.len() > HTTP_REQUEST_MAX_HEADER_NAME_LEN {
+            return Err(tool_err(format!(
+                "header name too long (max {HTTP_REQUEST_MAX_HEADER_NAME_LEN} characters)"
+            )));
+        }
+        if name.contains('\n') || name.contains('\r') || name.contains('\0') {
+            return Err(tool_err(format!(
+                "header name `{name}` contains invalid characters (CR, LF, and NUL are not allowed)"
+            )));
+        }
+        let value_str = match val {
+            Value::String(s) => s.as_str(),
+            _ => {
+                return Err(tool_err(format!(
+                    "header `{name}` value must be a string (JSON string)"
+                )));
+            }
+        };
+        if value_str.len() > HTTP_REQUEST_MAX_HEADER_VALUE_LEN {
+            return Err(tool_err(format!(
+                "header `{name}` value too long (max {HTTP_REQUEST_MAX_HEADER_VALUE_LEN} bytes)"
+            )));
+        }
+        if value_str.contains('\n') || value_str.contains('\r') || value_str.contains('\0') {
+            return Err(tool_err(format!(
+                "header `{name}` contains invalid characters (CR, LF, and NUL are not allowed — possible header injection)"
+            )));
+        }
+        let hn = HeaderName::from_str(name).map_err(|_| tool_err(format!("invalid HTTP header name: `{name}`")))?;
+        let hv =
+            HeaderValue::from_str(value_str).map_err(|_| tool_err(format!("invalid HTTP header value for `{name}`")))?;
+        out.push((hn, hv));
+    }
+    Ok(out)
+}
+
+fn http_method_from_json(v: &Value) -> Result<Method, ProviderError> {
+    let s = v
+        .get("method")
+        .and_then(|m| m.as_str())
+        .unwrap_or("GET")
+        .trim()
+        .to_ascii_uppercase();
+    match s.as_str() {
+        "" | "GET" => Ok(Method::GET),
+        "POST" => Ok(Method::POST),
+        "PUT" => Ok(Method::PUT),
+        "DELETE" => Ok(Method::DELETE),
+        "PATCH" => Ok(Method::PATCH),
+        other => Err(tool_err(format!(
+            "unsupported HTTP method `{other}` (allowed: GET, POST, PUT, DELETE, PATCH)"
+        ))),
+    }
+}
+
+fn response_headers_to_json_map(headers: &reqwest::header::HeaderMap) -> serde_json::Map<String, Value> {
+    let mut acc: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (k, v) in headers.iter() {
+        let key = k.as_str().to_string();
+        let val = v
+            .to_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| String::from_utf8_lossy(v.as_bytes()).into_owned());
+        acc.entry(key).or_default().push(val);
+    }
+    let mut out = serde_json::Map::new();
+    for (k, vals) in acc {
+        out.insert(k, json!(vals.join(", ")));
+    }
+    out
+}
+
+async fn http_request_tool(http: &reqwest::Client, v: &Value) -> Result<String, ProviderError> {
+    let raw_url = v
+        .get("url")
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| tool_err("http_request: `url` is required and must be a string"))?
+        .trim();
+    if raw_url.is_empty() {
+        return Err(tool_err("http_request: url is empty"));
+    }
+    let url = validate_agent_https_url(raw_url)?;
+    let method = http_method_from_json(v)?;
+    let header_pairs = parse_http_request_headers(v.get("headers"))?;
+    let user_agent_set = header_pairs
+        .iter()
+        .any(|(n, _)| n.as_str().eq_ignore_ascii_case("user-agent"));
+    let body_opt: Option<&str> = match v.get("body") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(_) => {
+            return Err(tool_err(
+                "http_request: `body` must be a JSON string or null/omitted (for JSON APIs, pass a stringified object as the body string)",
+            ));
+        }
+    };
+    let body_bytes: Option<Vec<u8>> = if let Some(b) = body_opt {
+        if b.as_bytes().len() > HTTP_REQUEST_MAX_REQ_BODY_BYTES {
+            return Err(tool_err(format!(
+                "http_request: body exceeds {} bytes",
+                HTTP_REQUEST_MAX_REQ_BODY_BYTES
+            )));
+        }
+        Some(b.as_bytes().to_vec())
+    } else {
+        None
+    };
+
+    let mut rb = http
+        .request(method, url.as_str())
+        .timeout(Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS));
+    if !user_agent_set {
+        rb = rb.header(USER_AGENT, NOVA_HTTP_REQUEST_UA);
+    }
+    for (name, value) in header_pairs {
+        rb = rb.header(name, value);
+    }
+    if let Some(bytes) = body_bytes {
+        rb = rb.body(bytes);
+    }
+
+    let res = match rb.send().await {
+        Ok(r) => r,
+        Err(e) => {
+            if e.is_timeout() {
+                return Err(tool_err(
+                    "http_request timed out — try again later, increase server responsiveness, or narrow the request",
+                ));
+            }
+            if e.is_connect() {
+                return Err(tool_err(format!(
+                    "http_request connection failed — check the URL, DNS, firewall, and TLS: {e}"
+                )));
+            }
+            if e.is_request() {
+                return Err(tool_err(format!("http_request could not be built or sent: {e}")));
+            }
+            return Err(ProviderError::Http(e));
+        }
+    };
+
+    let status = res.status();
+    let mut status_text = status
+        .canonical_reason()
+        .unwrap_or("Non-standard status")
+        .to_string();
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        status_text.push_str(" — Rate limited by the server; slow down and honor Retry-After if present in headers.");
+    } else if status == StatusCode::SERVICE_UNAVAILABLE
+        || status == StatusCode::BAD_GATEWAY
+        || status == StatusCode::GATEWAY_TIMEOUT
+    {
+        status_text.push_str(" — Upstream overload or outage; retry after a delay.");
+    }
+
+    let resp_headers = response_headers_to_json_map(res.headers());
+
+    let mut buf: Vec<u8> = Vec::new();
+    let mut stream = res.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| {
+            if e.is_timeout() {
+                tool_err("http_request timed out while reading the response body")
+            } else {
+                ProviderError::Http(e)
+            }
+        })?;
+        if buf.len() + chunk.len() > HTTP_REQUEST_MAX_RESPONSE_BYTES {
+            break;
+        }
+        buf.extend_from_slice(&chunk);
+    }
+
+    let mut body_out = String::from_utf8_lossy(&buf).into_owned();
+    if body_out.chars().count() > HTTP_REQUEST_RESPONSE_BODY_MAX_CHARS {
+        body_out = body_out
+            .chars()
+            .take(HTTP_REQUEST_RESPONSE_BODY_MAX_CHARS)
+            .collect::<String>()
+            + "\n… [truncated by Nova http_request output limit]";
+    }
+
+    let payload = json!({
+        "status": status.as_u16(),
+        "statusText": status_text,
+        "headers": resp_headers,
+        "body": body_out,
+    });
+    serde_json::to_string(&payload).map_err(|e| tool_err(format!("http_request: failed to serialize response: {e}")))
 }
 
 fn strip_html_to_text(html: &str) -> String {
@@ -451,7 +923,12 @@ pub async fn fetch_url_text(http: &reqwest::Client, raw_url: &str) -> Result<Str
 }
 
 /// Run one built-in tool by name; returns text for the `tool` message.
-pub async fn run_builtin_tool(http: &reqwest::Client, name: &str, arguments_json: &str) -> Result<String, ProviderError> {
+pub async fn run_builtin_tool(
+    http: &reqwest::Client,
+    workspace_root: Option<&Path>,
+    name: &str,
+    arguments_json: &str,
+) -> Result<String, ProviderError> {
     let v: Value = serde_json::from_str(arguments_json).map_err(|e| tool_err(format!("bad tool JSON: {e}")))?;
     match name.trim() {
         "web_search" => {
@@ -462,6 +939,30 @@ pub async fn run_builtin_tool(http: &reqwest::Client, name: &str, arguments_json
             let u = v["url"].as_str().unwrap_or("").trim();
             fetch_url_text(http, u).await
         }
+        "http_request" => http_request_tool(http, &v).await,
+        "workspace_read_file" => {
+            let root = workspace_root.ok_or_else(|| tool_err("workspace tools are not enabled"))?;
+            let p = v["path"].as_str().unwrap_or("").trim();
+            let max_bytes = v.get("max_bytes").and_then(|x| x.as_u64());
+            let text = workspace_read_file(root, p, max_bytes)?;
+            const TOOL_OUT_MAX: usize = 48_000;
+            if text.chars().count() > TOOL_OUT_MAX {
+                Ok(text.chars().take(TOOL_OUT_MAX).collect::<String>() + "\n… [truncated]")
+            } else {
+                Ok(text)
+            }
+        }
+        "workspace_write_file" => {
+            let root = workspace_root.ok_or_else(|| tool_err("workspace tools are not enabled"))?;
+            let p = v["path"].as_str().unwrap_or("").trim();
+            let c = v["content"].as_str().unwrap_or("");
+            workspace_write_file(root, p, c)
+        }
+        "workspace_list_directory" => {
+            let root = workspace_root.ok_or_else(|| tool_err("workspace tools are not enabled"))?;
+            let p = v["path"].as_str().unwrap_or("").trim();
+            workspace_list_directory(root, p)
+        }
         other => Err(tool_err(format!("unknown tool: {other}"))),
     }
 }
@@ -469,12 +970,48 @@ pub async fn run_builtin_tool(http: &reqwest::Client, name: &str, arguments_json
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn decode_ddg_redirect_extracts_uddg() {
         let u = "//duckduckgo.com/l/?uddg=https%3A%2F%2Fnews.example.com%2Fstory";
         let out = decode_ddg_redirect_url(u);
         assert_eq!(out, "https://news.example.com/story");
+    }
+
+    #[test]
+    fn https_url_validator_rejects_http() {
+        let err = validate_agent_https_url("http://example.com/path").unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("https"), "{err}");
+    }
+
+    #[test]
+    fn parse_http_request_headers_rejects_crlf_in_value() {
+        let v = json!({ "Authorization": "Bearer x\nX-Injected: 1" });
+        assert!(parse_http_request_headers(Some(&v)).is_err());
+    }
+
+    #[test]
+    fn parse_http_request_headers_accepts_bearer_shape() {
+        let v = json!({ "Authorization": "Bearer test_token_example" });
+        let h = parse_http_request_headers(Some(&v)).unwrap();
+        assert_eq!(h.len(), 1);
+    }
+
+    #[test]
+    fn workspace_rejects_dotdot() {
+        let tmp = std::env::temp_dir();
+        let err = resolve_workspace_subpath(&tmp, "a/../../passwd").unwrap_err();
+        assert!(err.to_string().contains(".."), "{err}");
+    }
+
+    #[test]
+    fn workspace_resolves_nested_path() {
+        let tmp = std::env::temp_dir().join("nova-ws-resolve-test");
+        let _ = std::fs::create_dir_all(&tmp);
+        let p = resolve_workspace_subpath(&tmp, "./notes/./file.txt").unwrap();
+        assert!(p.ends_with("file.txt"), "{p:?}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

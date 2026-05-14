@@ -4,10 +4,12 @@ use serde::Serialize;
 use serde_json::json;
 use tauri::{AppHandle, Emitter, State};
 
+use std::path::Path;
+
 use crate::memory::{ConversationMemory, MemoryRecallBundle, MessageRole, DEFAULT_PERSONALITY_ID};
 use crate::provider::{
     build_engine, ChatSendResult, ChatTurn, CompletionRequest, CompletionResponse, LLMProviderEngine,
-    ProviderError, StreamChunk, ToolCall,
+    ProviderError, StreamChunk, ToolCall, ToolDefinition,
 };
 use crate::NovaState;
 
@@ -223,17 +225,21 @@ fn web_tool_backend_for_provider(provider_id: &str) -> Option<AgentWebToolBacken
     }
 }
 
-/// Non-streaming completion with `web_search` / `fetch_url` tool rounds (OpenAI, Ollama, Anthropic).
-async fn agent_complete_with_web_tools(
+/// Non-streaming completion with tool rounds (OpenAI, Ollama, Anthropic).
+async fn agent_complete_with_tools(
     engine: &(dyn LLMProviderEngine + Send + Sync),
     http: &reqwest::Client,
+    workspace_root: Option<&Path>,
     mut messages: Vec<ChatTurn>,
     max_tokens: Option<u32>,
     temperature: f32,
     backend: AgentWebToolBackend,
+    tools: Vec<ToolDefinition>,
 ) -> Result<String, ProviderError> {
     const MAX_ROUNDS: usize = 8;
-    let tools = crate::agent_tools::builtin_tool_definitions();
+    if tools.is_empty() {
+        return Err(ProviderError::Api("internal: no tools configured".into()));
+    }
     for _ in 0..MAX_ROUNDS {
         let req = CompletionRequest {
             messages: messages.clone(),
@@ -256,9 +262,14 @@ async fn agent_complete_with_web_tools(
                     anthropic_message: None,
                 });
                 for tc in &resp.tool_calls {
-                    let body = crate::agent_tools::run_builtin_tool(http, &tc.name, &tc.arguments_json)
-                        .await
-                        .unwrap_or_else(|e| format!("Tool error: {e}"));
+                    let body = crate::agent_tools::run_builtin_tool(
+                        http,
+                        workspace_root,
+                        &tc.name,
+                        &tc.arguments_json,
+                    )
+                    .await
+                    .unwrap_or_else(|e| format!("Tool error: {e}"));
                     messages.push(ChatTurn {
                         role: "tool".into(),
                         content: body.clone(),
@@ -281,9 +292,14 @@ async fn agent_complete_with_web_tools(
                     anthropic_message: None,
                 });
                 for tc in &resp.tool_calls {
-                    let body = crate::agent_tools::run_builtin_tool(http, &tc.name, &tc.arguments_json)
-                        .await
-                        .unwrap_or_else(|e| format!("Tool error: {e}"));
+                    let body = crate::agent_tools::run_builtin_tool(
+                        http,
+                        workspace_root,
+                        &tc.name,
+                        &tc.arguments_json,
+                    )
+                    .await
+                    .unwrap_or_else(|e| format!("Tool error: {e}"));
                     messages.push(ChatTurn {
                         role: "tool".into(),
                         content: body.clone(),
@@ -307,9 +323,14 @@ async fn agent_complete_with_web_tools(
                 });
                 let mut bodies: Vec<String> = Vec::with_capacity(resp.tool_calls.len());
                 for tc in &resp.tool_calls {
-                    let body = crate::agent_tools::run_builtin_tool(http, &tc.name, &tc.arguments_json)
-                        .await
-                        .unwrap_or_else(|e| format!("Tool error: {e}"));
+                    let body = crate::agent_tools::run_builtin_tool(
+                        http,
+                        workspace_root,
+                        &tc.name,
+                        &tc.arguments_json,
+                    )
+                    .await
+                    .unwrap_or_else(|e| format!("Tool error: {e}"));
                     bodies.push(body);
                 }
                 messages.push(ChatTurn {
@@ -476,28 +497,40 @@ pub async fn chat_send_message(
     let temperature = state.settings.temperature();
     eprintln!("nova: chat_send_message temperature={temperature}");
 
-    let agent_web_tool_backend = state
+    let mut tool_definitions: Vec<ToolDefinition> = Vec::new();
+    if state.settings.agent_web_tools_enabled() {
+        tool_definitions.extend(crate::agent_tools::builtin_tool_definitions());
+    }
+    if state.settings.agent_workspace_enabled() {
+        tool_definitions.extend(crate::agent_tools::workspace_tool_definitions());
+    }
+    let workspace_root_for_tools = state
         .settings
-        .agent_web_tools_enabled()
+        .agent_workspace_enabled()
+        .then_some(state.workspace_root.as_path());
+
+    let agent_tool_backend = (!tool_definitions.is_empty())
         .then(|| web_tool_backend_for_provider(engine.provider_id()))
         .flatten();
-    if agent_web_tool_backend.is_some() {
+    if agent_tool_backend.is_some() {
         eprintln!(
-            "nova: chat agent web tools enabled (provider={}) — non-streaming tool loop + synthetic stream",
+            "nova: chat agent tools enabled (provider={}) — non-streaming tool loop + synthetic stream",
             engine.provider_id()
         );
     }
 
     let mut full = String::new();
 
-    if let Some(backend) = agent_web_tool_backend {
-        match agent_complete_with_web_tools(
+    if let Some(backend) = agent_tool_backend {
+        match agent_complete_with_tools(
             engine.as_ref(),
             &state.http,
+            workspace_root_for_tools,
             messages,
             max_tokens,
             temperature,
             backend,
+            tool_definitions,
         )
         .await
         {

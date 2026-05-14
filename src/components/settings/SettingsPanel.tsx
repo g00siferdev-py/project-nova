@@ -23,6 +23,8 @@ type SettingsView = {
   maxTokens?: number | null;
   /** When true and the active provider supports it, the model may call built-in web search / URL fetch tools. */
   agentWebToolsEnabled: boolean;
+  /** When true, the model may read/write/list files only under the app workspace folder (see data paths). */
+  agentWorkspaceEnabled: boolean;
   hasOpenaiApiKey: boolean;
   hasAnthropicApiKey: boolean;
   hasOllamaApiKey: boolean;
@@ -39,6 +41,7 @@ type SettingsPatch = {
   /** Omit = unchanged; null = clear cap */
   maxTokens?: number | null;
   agentWebToolsEnabled?: boolean;
+  agentWorkspaceEnabled?: boolean;
 };
 
 type ProviderDescriptor = {
@@ -203,6 +206,7 @@ type DestructiveModal = "memory" | "factory";
 type AppDataPaths = {
   dataDirectory: string;
   databaseFile: string;
+  workspaceDirectory: string;
   sqliteProfile: string;
   novaDataDirEnv: boolean;
   novaPortableEnv: boolean;
@@ -973,6 +977,60 @@ export function SettingsPanel({
                   http(s) pages you or it names. Requests are sent from this device; local and private URLs are
                   blocked. Ollama requires a tool-capable model. Off by default.
                 </p>
+                {settings &&
+                !["openai", "ollama", "ollama_cloud", "anthropic"].includes(settings.selectedProvider) ? (
+                  <p className="text-[11px] text-amber-400/90">
+                    Switch provider to OpenAI, Ollama, or Anthropic to use this option.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border border-slate-800/70 bg-slate-950/35 px-3 py-2.5">
+              <input
+                id="agent-workspace-tools"
+                type="checkbox"
+                className="mt-0.5 size-4 shrink-0 cursor-pointer rounded border-slate-600 accent-indigo-500 disabled:cursor-not-allowed"
+                checked={settings?.agentWorkspaceEnabled ?? false}
+                disabled={
+                  !settings ||
+                  !["openai", "ollama", "ollama_cloud", "anthropic"].includes(settings.selectedProvider)
+                }
+                onChange={(e) => {
+                  const agentWorkspaceEnabled = e.target.checked;
+                  setSettings((s) => (s ? { ...s, agentWorkspaceEnabled } : s));
+                  flushDebounce();
+                  void (async () => {
+                    try {
+                      setError(null);
+                      const next = await invoke<SettingsView>("settings_update", {
+                        patch: { agentWorkspaceEnabled },
+                      });
+                      setSettings(next);
+                    } catch (err) {
+                      setError(String(err));
+                      await refreshSettings();
+                    }
+                  })();
+                }}
+              />
+              <div className="min-w-0 space-y-1">
+                <label
+                  htmlFor="agent-workspace-tools"
+                  className="cursor-pointer text-xs font-medium text-slate-300"
+                >
+                  Allow workspace file tools for the assistant
+                </label>
+                <p className="text-[11px] leading-relaxed text-slate-500">
+                  When enabled, the model may list, read, and write UTF-8 text files only inside the Nova
+                  workspace folder (a subdirectory of your data directory). Paths are relative; parent
+                  segments like <span className="font-mono text-slate-400">..</span> are rejected. Off by
+                  default.
+                </p>
+                {dataPaths?.workspaceDirectory ? (
+                  <p className="break-all font-mono text-[10px] text-slate-500" title={dataPaths.workspaceDirectory}>
+                    Workspace: {dataPaths.workspaceDirectory}
+                  </p>
+                ) : null}
                 {settings &&
                 !["openai", "ollama", "ollama_cloud", "anthropic"].includes(settings.selectedProvider) ? (
                   <p className="text-[11px] text-amber-400/90">
