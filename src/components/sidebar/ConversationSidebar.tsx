@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import {
   Anchor,
   Brain,
+  ListRestart,
+  ListX,
   Loader2,
   MessageSquare,
   PenLine,
@@ -15,6 +17,12 @@ import { memoryRecall } from "@/hooks/useNovaMemory";
 
 type Props = {
   conversations: StoredConversation[];
+  /** Whether SQLite still has threads (for copy + restore when list is hidden). */
+  hasThreadsInDatabase: boolean;
+  /** UI-only: sidebar list cleared; database unchanged. */
+  threadListHiddenFromSidebar: boolean;
+  onClearThreadListFromView: () => void;
+  onRestoreThreadListFromView: () => void;
   activeId: string | null;
   onSelect: (id: string) => void;
   onNewChat: () => void;
@@ -38,6 +46,10 @@ function formatUpdated(iso: string): string {
 
 export function ConversationSidebar({
   conversations,
+  hasThreadsInDatabase,
+  threadListHiddenFromSidebar,
+  onClearThreadListFromView,
+  onRestoreThreadListFromView,
   activeId,
   onSelect,
   onNewChat,
@@ -140,15 +152,42 @@ export function ConversationSidebar({
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-1 px-2 pb-2">
-        <div className="flex items-center gap-2 px-2 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-          <MessageSquare className="size-3.5" aria-hidden />
-          Conversations
+        <div className="flex items-center justify-between gap-2 px-2 pb-1 pt-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
+          <span className="flex items-center gap-2">
+            <MessageSquare className="size-3.5" aria-hidden />
+            Conversations
+          </span>
+          {!threadListHiddenFromSidebar && hasThreadsInDatabase ? (
+            <button
+              type="button"
+              title="Hide thread list from this sidebar only — does not delete SQLite data"
+              onClick={() => onClearThreadListFromView()}
+              className="inline-flex shrink-0 items-center gap-1 rounded-md border border-slate-700/80 bg-slate-900/60 px-2 py-1 text-[10px] font-medium normal-case tracking-normal text-slate-400 transition hover:border-slate-600 hover:bg-slate-800/80 hover:text-slate-200"
+            >
+              <ListX className="size-3.5" aria-hidden />
+              Clear view
+            </button>
+          ) : null}
         </div>
         <nav className="max-h-[28vh] min-h-0 space-y-0.5 overflow-y-auto pr-1">
           {listLoading ? (
             <div className="flex items-center justify-center gap-2 py-8 text-xs text-slate-500">
               <Loader2 className="size-4 animate-spin text-indigo-400" aria-hidden />
               Loading…
+            </div>
+          ) : threadListHiddenFromSidebar && hasThreadsInDatabase ? (
+            <div className="space-y-3 px-2 py-4">
+              <p className="text-center text-xs leading-relaxed text-slate-400">
+                Thread list is hidden from this panel only. Nothing was removed from your database.
+              </p>
+              <button
+                type="button"
+                onClick={() => onRestoreThreadListFromView()}
+                className="flex w-full items-center justify-center gap-2 rounded-lg border border-slate-600 bg-slate-800/60 px-3 py-2 text-xs font-medium text-slate-200 transition hover:bg-slate-800"
+              >
+                <ListRestart className="size-3.5" aria-hidden />
+                Show threads from database
+              </button>
             </div>
           ) : conversations.length === 0 ? (
             <p className="px-2 py-4 text-center text-xs text-slate-500">

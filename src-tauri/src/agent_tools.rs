@@ -169,17 +169,17 @@ pub fn resolve_workspace_subpath(workspace_root: &Path, rel: &str) -> Result<Pat
     Ok(out)
 }
 
-fn workspace_root_canonical(workspace_root: &Path) -> Result<PathBuf, ProviderError> {
-    std::fs::canonicalize(workspace_root).map_err(|e| tool_err(format!("workspace root: {e}")))
-}
-
-/// Verifies `path` (built under the workspace) does not escape via symlinks.
-fn assert_path_in_workspace(workspace_root: &Path, path: &Path) -> Result<(), ProviderError> {
-    let root_canon = workspace_root_canonical(workspace_root)?;
+/// Verifies `path` does not escape `root` via symlinks (`root` is typically the canonical workspace or data directory).
+pub(crate) fn assert_path_contained_in(
+    root: &Path,
+    path: &Path,
+    label: &'static str,
+) -> Result<(), ProviderError> {
+    let root_canon = std::fs::canonicalize(root).map_err(|e| tool_err(format!("{label} root: {e}")))?;
     if path.exists() {
         let p = std::fs::canonicalize(path).map_err(|e| tool_err(format!("path: {e}")))?;
         if !p.starts_with(&root_canon) {
-            return Err(tool_err("path resolves outside the workspace"));
+            return Err(tool_err(format!("path resolves outside the {label}")));
         }
         return Ok(());
     }
@@ -191,17 +191,22 @@ fn assert_path_in_workspace(workspace_root: &Path, path: &Path) -> Result<(), Pr
         if anc.exists() {
             let a = std::fs::canonicalize(&anc).map_err(|e| tool_err(format!("path: {e}")))?;
             if !a.starts_with(&root_canon) {
-                return Err(tool_err("path resolves outside the workspace"));
+                return Err(tool_err(format!("path resolves outside the {label}")));
             }
             return Ok(());
         }
-        if anc == workspace_root {
+        if anc == root {
             return Ok(());
         }
         if !anc.pop() {
-            return Err(tool_err("path escapes the workspace"));
+            return Err(tool_err(format!("path escapes the {label}")));
         }
     }
+}
+
+/// Verifies `path` (built under the workspace) does not escape via symlinks.
+pub(crate) fn assert_path_in_workspace(workspace_root: &Path, path: &Path) -> Result<(), ProviderError> {
+    assert_path_contained_in(workspace_root, path, "workspace")
 }
 
 fn workspace_read_file(workspace_root: &Path, rel: &str, max_bytes: Option<u64>) -> Result<String, ProviderError> {
@@ -283,7 +288,7 @@ fn workspace_list_directory(workspace_root: &Path, rel: &str) -> Result<String, 
     }
 }
 
-fn tool_err(msg: impl Into<String>) -> ProviderError {
+pub(crate) fn tool_err(msg: impl Into<String>) -> ProviderError {
     ProviderError::Api(msg.into())
 }
 
@@ -926,6 +931,9 @@ pub async fn fetch_url_text(http: &reqwest::Client, raw_url: &str) -> Result<Str
 pub async fn run_builtin_tool(
     http: &reqwest::Client,
     workspace_root: Option<&Path>,
+    data_directory: &Path,
+    database_app_data_enabled: bool,
+    database_allow_write: bool,
     name: &str,
     arguments_json: &str,
 ) -> Result<String, ProviderError> {
@@ -962,6 +970,27 @@ pub async fn run_builtin_tool(
             let root = workspace_root.ok_or_else(|| tool_err("workspace tools are not enabled"))?;
             let p = v["path"].as_str().unwrap_or("").trim();
             workspace_list_directory(root, p)
+        }
+        "database_query" => {
+            let args = v.clone();
+            let wr = workspace_root.map(Path::to_path_buf);
+            let workspace_db = workspace_root.is_some();
+            let dd = data_directory.to_path_buf();
+            let app_data_ok = database_app_data_enabled;
+            let allow = database_allow_write;
+            let r = tokio::task::spawn_blocking(move || {
+                crate::database_query::run_database_query_sync(
+                    wr.as_deref(),
+                    workspace_db,
+                    &dd,
+                    app_data_ok,
+                    allow,
+                    &args,
+                )
+            })
+            .await
+            .map_err(|e| tool_err(format!("database_query join error: {e}")))?;
+            r
         }
         other => Err(tool_err(format!("unknown tool: {other}"))),
     }

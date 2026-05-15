@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use thiserror::Error;
 
+use crate::database_query::{PREF_DATABASE_ALLOW_WRITE, PREF_DATABASE_APP_DATA};
 use crate::memory::{ConversationMemory, MemoryError};
 
 const KEYRING_SERVICE: &str = "Nova";
@@ -76,6 +77,10 @@ pub struct SettingsFile {
     pub agent_web_tools_enabled: bool,
     #[serde(default = "default_agent_workspace")]
     pub agent_workspace_enabled: bool,
+    #[serde(default = "default_database_allow_write")]
+    pub database_allow_write: bool,
+    #[serde(default = "default_database_app_data")]
+    pub database_app_data_enabled: bool,
     #[serde(default)]
     pub encrypted_api_keys: HashMap<String, EncryptedApiKeyBlob>,
 }
@@ -85,6 +90,14 @@ fn default_agent_web_tools() -> bool {
 }
 
 fn default_agent_workspace() -> bool {
+    false
+}
+
+fn default_database_allow_write() -> bool {
+    false
+}
+
+fn default_database_app_data() -> bool {
     false
 }
 
@@ -110,6 +123,8 @@ impl Default for SettingsFile {
             max_tokens: None,
             agent_web_tools_enabled: false,
             agent_workspace_enabled: false,
+            database_allow_write: false,
+            database_app_data_enabled: false,
             encrypted_api_keys: HashMap::new(),
         }
     }
@@ -129,6 +144,8 @@ pub struct SettingsView {
     pub max_tokens: Option<u32>,
     pub agent_web_tools_enabled: bool,
     pub agent_workspace_enabled: bool,
+    pub database_allow_write: bool,
+    pub database_app_data_enabled: bool,
     pub has_openai_api_key: bool,
     pub has_anthropic_api_key: bool,
     pub has_ollama_api_key: bool,
@@ -149,6 +166,8 @@ pub struct SettingsUpdatePayload {
     pub max_tokens: Option<JsonValue>,
     pub agent_web_tools_enabled: Option<bool>,
     pub agent_workspace_enabled: Option<bool>,
+    pub database_allow_write: Option<bool>,
+    pub database_app_data_enabled: Option<bool>,
 }
 
 // --- Crypto ------------------------------------------------------------------
@@ -395,6 +414,18 @@ impl SettingsManager {
             .preference_set("nova.ollama.model", inner.ollama_model.trim())?;
         self.memory
             .preference_set("nova.ollama.base_url", inner.ollama_base_url.trim())?;
+        self.memory.preference_set(
+            PREF_DATABASE_ALLOW_WRITE,
+            if inner.database_allow_write { "true" } else { "false" },
+        )?;
+        self.memory.preference_set(
+            PREF_DATABASE_APP_DATA,
+            if inner.database_app_data_enabled {
+                "true"
+            } else {
+                "false"
+            },
+        )?;
         Ok(())
     }
 
@@ -418,6 +449,8 @@ impl SettingsManager {
             max_tokens: inner.max_tokens,
             agent_web_tools_enabled: inner.agent_web_tools_enabled,
             agent_workspace_enabled: inner.agent_workspace_enabled,
+            database_allow_write: inner.database_allow_write,
+            database_app_data_enabled: inner.database_app_data_enabled,
             has_openai_api_key: can_decrypt_api_blob(&self.aes_key, inner.encrypted_api_keys.get("openai")),
             has_anthropic_api_key: can_decrypt_api_blob(
                 &self.aes_key,
@@ -449,6 +482,20 @@ impl SettingsManager {
         self.inner
             .read()
             .map(|g| g.agent_workspace_enabled)
+            .unwrap_or(false)
+    }
+
+    pub fn database_allow_write(&self) -> bool {
+        self.inner
+            .read()
+            .map(|g| g.database_allow_write)
+            .unwrap_or(false)
+    }
+
+    pub fn database_app_data_enabled(&self) -> bool {
+        self.inner
+            .read()
+            .map(|g| g.database_app_data_enabled)
             .unwrap_or(false)
     }
 
@@ -587,6 +634,12 @@ impl SettingsManager {
         }
         if let Some(b) = patch.agent_workspace_enabled {
             inner.agent_workspace_enabled = b;
+        }
+        if let Some(b) = patch.database_allow_write {
+            inner.database_allow_write = b;
+        }
+        if let Some(b) = patch.database_app_data_enabled {
+            inner.database_app_data_enabled = b;
         }
         inner.version = SETTINGS_VERSION;
         drop(inner);

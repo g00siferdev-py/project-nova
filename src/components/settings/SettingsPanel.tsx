@@ -25,6 +25,10 @@ type SettingsView = {
   agentWebToolsEnabled: boolean;
   /** When true, the model may read/write/list files only under the app workspace folder (see data paths). */
   agentWorkspaceEnabled: boolean;
+  /** When true, database_query may use location=app_data on .db/.sqlite files in the Nova data directory (same folder as the live memory DB). */
+  databaseAppDataEnabled: boolean;
+  /** When true, database_query may run INSERT/UPDATE/DELETE/REPLACE on workspace .db files (DROP/ALTER/CREATE still blocked). */
+  databaseAllowWrite: boolean;
   hasOpenaiApiKey: boolean;
   hasAnthropicApiKey: boolean;
   hasOllamaApiKey: boolean;
@@ -42,6 +46,8 @@ type SettingsPatch = {
   maxTokens?: number | null;
   agentWebToolsEnabled?: boolean;
   agentWorkspaceEnabled?: boolean;
+  databaseAppDataEnabled?: boolean;
+  databaseAllowWrite?: boolean;
 };
 
 type ProviderDescriptor = {
@@ -1021,10 +1027,14 @@ export function SettingsPanel({
                   Allow workspace file tools for the assistant
                 </label>
                 <p className="text-[11px] leading-relaxed text-slate-500">
-                  When enabled, the model may list, read, and write UTF-8 text files only inside the Nova
-                  workspace folder (a subdirectory of your data directory). Paths are relative; parent
-                  segments like <span className="font-mono text-slate-400">..</span> are rejected. Off by
-                  default.
+                  When enabled, the model may list, read, and write UTF-8 text files in the Nova workspace, and
+                  run <span className="font-mono text-slate-400">database_query</span> with{" "}
+                  <span className="font-mono text-slate-400">location=&quot;workspace&quot;</span> on{" "}
+                  <span className="font-mono text-slate-400">.db</span> /{" "}
+                  <span className="font-mono text-slate-400">.sqlite</span> files there. Paths are relative;
+                  parent segments like <span className="font-mono text-slate-400">..</span> are rejected. Off by
+                  default. For the live app database folder, enable{" "}
+                  <span className="text-slate-400">App data directory databases</span> below instead.
                 </p>
                 {dataPaths?.workspaceDirectory ? (
                   <p className="break-all font-mono text-[10px] text-slate-500" title={dataPaths.workspaceDirectory}>
@@ -1037,6 +1047,104 @@ export function SettingsPanel({
                     Switch provider to OpenAI, Ollama, or Anthropic to use this option.
                   </p>
                 ) : null}
+              </div>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border border-slate-800/70 bg-slate-950/35 px-3 py-2.5">
+              <input
+                id="database-app-data-enabled"
+                type="checkbox"
+                className="mt-0.5 size-4 shrink-0 cursor-pointer rounded border-slate-600 accent-indigo-500 disabled:cursor-not-allowed"
+                checked={settings?.databaseAppDataEnabled ?? false}
+                disabled={
+                  !settings ||
+                  !["openai", "ollama", "ollama_cloud", "anthropic"].includes(settings.selectedProvider)
+                }
+                onChange={(e) => {
+                  const databaseAppDataEnabled = e.target.checked;
+                  setSettings((s) => (s ? { ...s, databaseAppDataEnabled } : s));
+                  flushDebounce();
+                  void (async () => {
+                    try {
+                      setError(null);
+                      const next = await invoke<SettingsView>("settings_update", {
+                        patch: { databaseAppDataEnabled },
+                      });
+                      setSettings(next);
+                    } catch (err) {
+                      setError(String(err));
+                      await refreshSettings();
+                    }
+                  })();
+                }}
+              />
+              <div className="min-w-0 space-y-1">
+                <label
+                  htmlFor="database-app-data-enabled"
+                  className="cursor-pointer text-xs font-medium text-slate-300"
+                >
+                  App data directory databases (<span className="font-mono text-slate-400">database_query</span>{" "}
+                  <span className="font-mono text-slate-400">location=app_data</span>)
+                </label>
+                <p className="text-[11px] leading-relaxed text-slate-500">
+                  When enabled, the model may query SQLite files in Nova&apos;s data directory — the same resolved
+                  path as the live memory database (for example{" "}
+                  <span className="font-mono text-slate-400">~/.local/share/nova</span> on Linux, or the portable{" "}
+                  <span className="font-mono text-slate-400">data/</span> folder next to the executable). Use a
+                  filename only (e.g. <span className="font-mono text-slate-400">nova_memory.sqlite</span>), no
+                  subdirectories. Off by default.
+                </p>
+                {dataPaths?.dataDirectory ? (
+                  <p className="break-all font-mono text-[10px] text-slate-500" title={dataPaths.dataDirectory}>
+                    Data directory: {dataPaths.dataDirectory}
+                  </p>
+                ) : null}
+                {settings &&
+                !["openai", "ollama", "ollama_cloud", "anthropic"].includes(settings.selectedProvider) ? (
+                  <p className="text-[11px] text-amber-400/90">
+                    Switch provider to OpenAI, Ollama, or Anthropic to use this option.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border border-slate-800/70 bg-slate-950/35 px-3 py-2.5">
+              <input
+                id="database-allow-write"
+                type="checkbox"
+                className="mt-0.5 size-4 shrink-0 cursor-pointer rounded border-slate-600 accent-indigo-500 disabled:cursor-not-allowed"
+                checked={settings?.databaseAllowWrite ?? false}
+                disabled={
+                  !settings ||
+                  (!settings.agentWorkspaceEnabled && !settings.databaseAppDataEnabled) ||
+                  !["openai", "ollama", "ollama_cloud", "anthropic"].includes(settings.selectedProvider)
+                }
+                onChange={(e) => {
+                  const databaseAllowWrite = e.target.checked;
+                  setSettings((s) => (s ? { ...s, databaseAllowWrite } : s));
+                  flushDebounce();
+                  void (async () => {
+                    try {
+                      setError(null);
+                      const next = await invoke<SettingsView>("settings_update", {
+                        patch: { databaseAllowWrite },
+                      });
+                      setSettings(next);
+                    } catch (err) {
+                      setError(String(err));
+                      await refreshSettings();
+                    }
+                  })();
+                }}
+              />
+              <div className="min-w-0 space-y-1">
+                <label htmlFor="database-allow-write" className="cursor-pointer text-xs font-medium text-slate-300">
+                  Allow database writes (<span className="font-mono text-slate-400">database_query</span>)
+                </label>
+                <p className="text-[11px] leading-relaxed text-slate-500">
+                  When off (default), <span className="font-mono text-slate-400">database_query</span> is
+                  read-only (SELECT and introspection). When on, INSERT/UPDATE/DELETE/REPLACE are allowed on
+                  workspace or app-data databases (per toggles above); DROP/ALTER/CREATE/PRAGMA/VACUUM remain
+                  blocked. Requires workspace tools and/or app data databases to be enabled.
+                </p>
               </div>
             </div>
             <label className="block text-xs font-medium text-slate-400" htmlFor="max-tokens-select">

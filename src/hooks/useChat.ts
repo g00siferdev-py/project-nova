@@ -61,6 +61,8 @@ export function useChat() {
   const [activePersonalityId, setActivePersonalityId] = useState("default");
   /** Last `personality_get` snapshot — used for companion labels and header dropdown. */
   const [personalityFile, setPersonalityFile] = useState<PersonalityFile | null>(null);
+  /** When true, the sidebar shows no threads and the main pane has no selection — SQLite is unchanged. */
+  const [threadListHiddenFromSidebar, setThreadListHiddenFromSidebar] = useState(false);
 
   const loadSeq = useRef(0);
   const activeConversationIdRef = useRef<string | null>(null);
@@ -149,6 +151,7 @@ export function useChat() {
   const applyActivePersonality = useCallback(
     async (personalityId: string) => {
       const id = personalityId.trim() || "default";
+      setThreadListHiddenFromSidebar(false);
       try {
         console.info("[nova-chat] applyActivePersonality: awaiting memory_set_active_personality", {
           personalityId: id,
@@ -238,11 +241,39 @@ export function useChat() {
   }, [activeConversationId, loadActiveThread]);
 
   const selectConversation = useCallback((id: string) => {
+    setThreadListHiddenFromSidebar(false);
     setActiveConversationId(id);
   }, []);
 
+  /** Hides the conversation list and active thread in the UI only; does not call delete or touch the DB. */
+  const clearConversationSidebarView = useCallback(() => {
+    loadSeq.current += 1;
+    setThreadListHiddenFromSidebar(true);
+    setActiveConversationId(null);
+    setBriefing("");
+    setAnchors([]);
+    setMessages([]);
+    setError(null);
+  }, []);
+
+  /** Reload threads from the database and show the list again. */
+  const restoreConversationSidebarView = useCallback(async () => {
+    setError(null);
+    setThreadListHiddenFromSidebar(false);
+    const list = await refreshConversations();
+    if (list.length === 0) {
+      setActiveConversationId(null);
+      return;
+    }
+    setActiveConversationId((prev) => {
+      if (prev && list.some((c) => c.id === prev)) return prev;
+      return list[0]?.id ?? null;
+    });
+  }, [refreshConversations]);
+
   const startNewConversation = useCallback(async () => {
     setError(null);
+    setThreadListHiddenFromSidebar(false);
     const pid = activePersonalityIdRef.current.trim() || activePersonalityId.trim() || "default";
     try {
       console.info("[nova-chat] startNewConversation: awaiting memory_set_active_personality before create", {
@@ -464,8 +495,15 @@ export function useChat() {
     ],
   );
 
+  const sidebarConversations = threadListHiddenFromSidebar ? [] : conversations;
+
   return {
-    conversations,
+    conversations: sidebarConversations,
+    /** Full list from DB (ignores sidebar hide). For labels that need the active title after restore. */
+    conversationsForTitle: conversations,
+    threadListHiddenFromSidebar,
+    clearConversationSidebarView,
+    restoreConversationSidebarView,
     activeConversationId,
     activePersonalityId,
     activeCompanionLabel,

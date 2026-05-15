@@ -71,6 +71,10 @@ export function ChatLayout() {
 
   const {
     conversations,
+    conversationsForTitle,
+    threadListHiddenFromSidebar,
+    clearConversationSidebarView,
+    restoreConversationSidebarView,
     activeConversationId,
     messages,
     briefing,
@@ -95,9 +99,9 @@ export function ChatLayout() {
   const title = useMemo(() => {
     if (!activeConversationId) return "Nova";
     return (
-      conversations.find((c) => c.id === activeConversationId)?.title ?? "Chat"
+      conversationsForTitle.find((c) => c.id === activeConversationId)?.title ?? "Chat"
     );
-  }, [activeConversationId, conversations]);
+  }, [activeConversationId, conversationsForTitle]);
 
   const subtitle = threadLoading
     ? "Loading context from MemoryAnchor…"
@@ -107,6 +111,10 @@ export function ChatLayout() {
     <div className="flex h-full w-full overflow-hidden">
       <ConversationSidebar
         conversations={conversations}
+        hasThreadsInDatabase={conversationsForTitle.length > 0}
+        threadListHiddenFromSidebar={threadListHiddenFromSidebar}
+        onClearThreadListFromView={clearConversationSidebarView}
+        onRestoreThreadListFromView={() => void restoreConversationSidebarView()}
         activeId={activeConversationId}
         onSelect={selectConversation}
         onNewChat={() => void startNewConversation()}

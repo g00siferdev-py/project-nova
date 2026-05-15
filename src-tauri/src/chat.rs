@@ -230,6 +230,9 @@ async fn agent_complete_with_tools(
     engine: &(dyn LLMProviderEngine + Send + Sync),
     http: &reqwest::Client,
     workspace_root: Option<&Path>,
+    data_directory: &Path,
+    database_app_data_enabled: bool,
+    database_allow_write: bool,
     mut messages: Vec<ChatTurn>,
     max_tokens: Option<u32>,
     temperature: f32,
@@ -265,6 +268,9 @@ async fn agent_complete_with_tools(
                     let body = crate::agent_tools::run_builtin_tool(
                         http,
                         workspace_root,
+                        data_directory,
+                        database_app_data_enabled,
+                        database_allow_write,
                         &tc.name,
                         &tc.arguments_json,
                     )
@@ -295,6 +301,9 @@ async fn agent_complete_with_tools(
                     let body = crate::agent_tools::run_builtin_tool(
                         http,
                         workspace_root,
+                        data_directory,
+                        database_app_data_enabled,
+                        database_allow_write,
                         &tc.name,
                         &tc.arguments_json,
                     )
@@ -326,6 +335,9 @@ async fn agent_complete_with_tools(
                     let body = crate::agent_tools::run_builtin_tool(
                         http,
                         workspace_root,
+                        data_directory,
+                        database_app_data_enabled,
+                        database_allow_write,
                         &tc.name,
                         &tc.arguments_json,
                     )
@@ -504,10 +516,17 @@ pub async fn chat_send_message(
     if state.settings.agent_workspace_enabled() {
         tool_definitions.extend(crate::agent_tools::workspace_tool_definitions());
     }
+    let database_tools_enabled =
+        state.settings.agent_workspace_enabled() || state.settings.database_app_data_enabled();
+    if database_tools_enabled {
+        tool_definitions.extend(crate::database_query::tool_definitions());
+    }
     let workspace_root_for_tools = state
         .settings
         .agent_workspace_enabled()
         .then_some(state.workspace_root.as_path());
+    let database_app_data_enabled = state.settings.database_app_data_enabled();
+    let database_allow_write = state.settings.database_allow_write();
 
     let agent_tool_backend = (!tool_definitions.is_empty())
         .then(|| web_tool_backend_for_provider(engine.provider_id()))
@@ -526,6 +545,9 @@ pub async fn chat_send_message(
             engine.as_ref(),
             &state.http,
             workspace_root_for_tools,
+            state.data_directory.as_path(),
+            database_app_data_enabled,
+            database_allow_write,
             messages,
             max_tokens,
             temperature,

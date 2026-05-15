@@ -14,6 +14,7 @@ out/
 # Rust / Cargo
 **/target/
 target/
+.cargo-target-local/
 
 # Tauri (generated + local bundle noise)
 src-tauri/gen/schemas/

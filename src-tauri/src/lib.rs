@@ -10,6 +10,7 @@
 
 mod agent_tools;
 mod chat;
+mod database_query;
 mod memory;
 mod personality;
 mod settings;
@@ -42,6 +43,8 @@ pub struct NovaState {
     pub(crate) personality: Arc<PersonalityManager>,
     /// Canonical agent workspace (`{data_dir}/workspace`). Created at startup; tools only touch paths inside it.
     pub(crate) workspace_root: PathBuf,
+    /// Canonical Nova data directory (same resolution as MemoryAnchor: `NOVA_DATA_DIR`, portable `data/`, or OS app data).
+    pub(crate) data_directory: PathBuf,
 }
 
 impl NovaState {
@@ -51,6 +54,7 @@ impl NovaState {
         settings: Arc<SettingsManager>,
         personality: Arc<PersonalityManager>,
         workspace_root: PathBuf,
+        data_directory: PathBuf,
     ) -> Self {
         let http = reqwest::Client::builder()
             .user_agent(format!("Nova/{}", env!("CARGO_PKG_VERSION")))
@@ -72,6 +76,7 @@ impl NovaState {
             settings,
             personality,
             workspace_root,
+            data_directory,
         }
     }
 }
@@ -525,6 +530,12 @@ pub fn run() {
         PersonalityManager::load(&data_dir).expect("failed to load personality store"),
     );
 
+    let mut data_directory = data_dir.clone();
+    if let Ok(c) = std::fs::canonicalize(&data_directory) {
+        data_directory = c;
+    }
+    eprintln!("nova: resolved data directory {}", data_directory.display());
+
     let mut workspace_root = data_dir.join("workspace");
     if let Err(e) = std::fs::create_dir_all(&workspace_root) {
         eprintln!(
@@ -541,6 +552,7 @@ pub fn run() {
             settings,
             personality,
             workspace_root,
+            data_directory,
         ))
         .invoke_handler(tauri::generate_handler![
             app_version,
