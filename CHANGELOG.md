@@ -2,76 +2,80 @@
 
 All notable changes to this project are documented in this file.
 
-The format is inspired by [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
 ### Added
 
-#### Agent workspace (sandboxed file access)
+#### Chat vision (image attachments)
 
-- **`workspace_read_file`** — Read UTF-8 text from a path **relative** to the app workspace root. Optional `max_bytes` cap.
-- **`workspace_write_file`** — Create or overwrite a UTF-8 text file; parent directories are created as needed.
-- **`workspace_list_directory`** — Non-recursive listing of a relative directory (use `"."` for the workspace root).
-- **Path rules** — Relative paths only, forward slashes, no `..` segments. Resolved paths are checked with `canonicalize` so symlinks cannot escape the workspace.
-- **Settings** — `agentWorkspaceEnabled` (default `false`), exposed in the React settings panel as **Allow workspace file tools for the assistant**. Same provider gate as web tools (OpenAI, Ollama, Anthropic).
-- **Runtime directory** — `{data_directory}/workspace` is created on app startup (`create_dir_all` in Tauri `run()`), not at compile time. `NovaState` holds canonical `workspace_root` for tool execution.
+- **Composer** — Attach JPEG, PNG, WebP, or GIF from the chat input; preview before send.
+- **Storage** — Images saved under `{data_dir}/attachments/{conversationId}/`; paths stored in SQLite (`image_attachment`, `image_mime`).
+- **Providers** — Multimodal payloads for OpenAI (`image_url`), Anthropic (image blocks), Ollama (`images` array).
+- **`chat_vision_supported`** IPC — UI disables attach when the active model is not vision-capable.
+- **Asset protocol** — Tauri config enables local attachment display via `convertFileSrc`.
 
-#### Agent HTTPS `http_request`
+#### Pulse (scheduled companion check-ins)
 
-- **`http_request`** — Custom **HTTPS-only** HTTP client for the model: optional `method` (`GET` | `POST` | `PUT` | `DELETE` | `PATCH`, default `GET`), optional `headers` (object of string values), optional string `body` (e.g. stringified JSON for APIs).
-- **Response shape** — Tool returns a JSON **string** with `status`, `statusText`, `headers`, and `body` (including 4xx/5xx; no `error_for_status` abort). Large response bodies are truncated for LLM context.
-- **Security** — Same host allowlist as `fetch_url` (SSRF guard); **no `http://`**; no userinfo in URLs (tokens go in headers). Header names/values reject CR/LF/NUL; `HeaderName` / `HeaderValue` validation; caps on header count and sizes. Supports **`Authorization: Bearer …`** and other standard headers.
-- **Operational** — 30s timeout; clear errors for timeouts, connection failures, and invalid input; extra guidance in `statusText` for **429** and selected 5xx codes; `Retry-After` preserved in response headers when the server sends it.
+- **In-thread execution** — Pulse runs `execute_chat_turn` on the **sidebar-selected** conversation (same SQLite transcript, briefing, streaming as manual chat).
+- **Settings** — `pulseEnabled`, `pulseIntervalMinutes`, `pulseInstructions`, `pulseConversationId` in `settings.json`.
+- **Events** — `pulse:tick` emitted to the UI after each run.
 
-#### IPC and settings schema
+#### Documentation
 
-- **`AppDataPaths.workspaceDirectory`** — String path to `{dataDirectory}/workspace` from `app_data_paths` (for UI/debug).
-- **Settings file / view / patch** — `agent_workspace_enabled` persisted with serde camelCase as `agentWorkspaceEnabled` in JSON to the frontend.
+- **`docs/`** suite — [INSTALL](./docs/INSTALL.md), [USER-GUIDE](./docs/USER-GUIDE.md), [DATA-AND-PRIVACY](./docs/DATA-AND-PRIVACY.md), [ARCHITECTURE](./docs/ARCHITECTURE.md), [DEVELOPMENT](./docs/DEVELOPMENT.md).
+- **[CONTRIBUTING.md](./CONTRIBUTING.md)** — Contribution expectations.
+- **README** — Links to docs; correct repository URL; privacy summary (DB not encrypted, local after build).
 
 ### Changed
 
-- **`chat.rs`** — Non-streaming tool loop runs when **either** web tools **or** workspace tools are enabled (merged `ToolDefinition` list). `agent_complete_with_tools` passes optional `workspace_root` into `run_builtin_tool` for workspace tool dispatch.
-- **`run_builtin_tool`** — Signature extended with `workspace_root: Option<&Path>` for workspace tools; web and HTTP tools ignore it.
+- **Settings panel** — Tabs reorganized: **Companion**, **Provider**, **Tools**, **General** (Pulse under General).
+- **Ollama + images** — Agent tools disabled for requests that include images (Ollama ignores `images` when `tools` are set).
+- **`model_supports_vision`** — Expanded heuristics (e.g. `kimi`, `qwen`, `-vl` models).
+- **`loadActiveThread`** — Loads messages first; briefing/anchor failures no longer wipe the transcript.
+- **Memory migrations** — Image columns migrate on every app open (fixes v6 databases missing columns).
 
-### Frontend
+### Fixed
 
-- **`SettingsPanel.tsx`** — `agentWorkspaceEnabled` toggle and copy; `AppDataPaths` type includes `workspaceDirectory`; workspace path shown when data paths load.
+- **`get_recent`** failing on existing databases at schema v6 without image columns.
+- **Pulse** calling `execute_chat_turn` with updated signature.
+- **`chat_vision_supported`** command visibility for Tauri handler registration.
 
-### Tests (Rust)
+### Files touched (summary)
 
-- Workspace path resolution rejects `..` and accepts normalized `./` segments.
-- `http_request` header parsing rejects CRLF injection; HTTPS validator rejects plain `http`; Bearer-shaped header accepted.
-
-### Files touched (this release batch)
-
-| File | Role |
-|------|------|
-| `src-tauri/src/agent_tools.rs` | Workspace tools, `http_request`, URL/header validation, `run_builtin_tool` dispatch, unit tests |
-| `src-tauri/src/chat.rs` | Merged tools, `agent_complete_with_tools`, `workspace_root` wiring |
-| `src-tauri/src/lib.rs` | `NovaState.workspace_root`, startup `create_dir_all` + canonicalize, `AppDataPaths.workspace_directory` |
-| `src-tauri/src/settings.rs` | `agent_workspace_enabled` in file, view, patch, getter |
-| `src/components/settings/SettingsPanel.tsx` | Workspace toggle, types, workspace path hint |
+| Area | Files |
+|------|-------|
+| Vision | `src-tauri/src/attachments.rs`, `chat.rs`, `memory.rs`, `ChatMain.tsx`, `useChat.ts` |
+| Pulse | `src-tauri/src/pulse.rs`, `settings.rs`, `SettingsPanel.tsx` |
+| Docs | `docs/*`, `README.md`, `USER-GUIDE.md`, `CONTRIBUTING.md` |
 
 ---
 
-### Suggested commit message (for GitHub)
+## [0.1.0] — prior releases on main
 
-**Title:** `feat(agent): workspace file tools, https http_request, and settings`
+### Added — Agent workspace and HTTPS tools
 
-**Body:**
+- Sandboxed `workspace/` tools (`workspace_read_file`, `workspace_write_file`, `workspace_list_directory`).
+- **`http_request`** — HTTPS-only agent tool with custom headers and body.
+- Settings: `agentWorkspaceEnabled`, `agentWebToolsEnabled`, database query toggles.
 
-```
-- Add sandboxed workspace under {data_dir}/workspace (runtime mkdir).
-- Tools: workspace_read_file, workspace_write_file, workspace_list_directory.
-- Add http_request (HTTPS only, custom headers/method/body, SSRF guards).
-- Settings + UI: agentWorkspaceEnabled; AppDataPaths.workspaceDirectory.
-- Merge web + workspace tool definitions in chat tool loop.
-```
+### Added — Web agent tools
 
-### Pre-push checklist
+- `web_search`, `fetch_url` with SSRF guards.
 
-1. `cd src-tauri && cargo check` (and `cargo test agent_tools` if you change Rust).
-2. `npm run build` for the frontend.
-3. Smoke-test: enable web tools and/or workspace tools, send a chat message with a supported provider.
-4. **Do not commit secrets** — API keys and Bearer tokens belong in settings or env, not in docs or commits.
+### Added — Core platform
+
+- Tauri 2 + React 19 chat UI with streaming.
+- Memory Anchor SQLite schema (v6 personality isolation).
+- OpenAI, Ollama, Anthropic providers; encrypted API keys.
+- Companion personality profiles.
+
+---
+
+## Pre-push checklist
+
+1. `cd src-tauri && cargo check && cargo test`
+2. `npm run build`
+3. Smoke-test `npm run tauri dev` (chat, optional image, settings)
+4. Do not commit secrets or `nova_memory.sqlite`
