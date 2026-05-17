@@ -32,6 +32,9 @@ export interface StoredMessage {
   role: "user" | "assistant";
   content: string;
   createdAt: string;
+  imageAttachment?: string;
+  imageMime?: string;
+  imageDisplayPath?: string;
   /** Present when returned from cross-thread `memory_recall`. */
   conversationId?: string;
   conversationTitle?: string;
@@ -48,6 +51,9 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  /** Local file URL from `convertFileSrc` when the message has an image attachment. */
+  imageDisplayPath?: string;
+  imageMime?: string;
 }
 
 /** Result of `chat_send_message` (camelCase from Rust). */
@@ -69,5 +75,7 @@ export function storedToChatMessage(m: StoredMessage): ChatMessage {
     id: String(m.id),
     role: m.role,
     content: m.content,
+    imageDisplayPath: m.imageDisplayPath,
+    imageMime: m.imageMime,
   };
 }

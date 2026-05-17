@@ -21,6 +21,7 @@ commands.allow = [
   "personality_get",
   "personality_save",
   "chat_send_message",
+  "chat_vision_supported",
   "memory_set_active_personality",
   "memory_list_conversations",
   "memory_get_conversation",

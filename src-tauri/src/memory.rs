@@ -97,6 +97,14 @@ pub struct StoredMessage {
     pub role: MessageRole,
     pub content: String,
     pub created_at: String,
+    /// Relative path under the Nova data directory (`attachments/...`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_attachment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_mime: Option<String>,
+    /// Absolute path for the webview (`convertFileSrc`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_display_path: Option<String>,
     /// Set when a row is returned from cross-thread recall (`memory_recall` with global scope).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
@@ -189,6 +197,8 @@ pub trait ConversationMemory: Send + Sync {
         conversation_id: &str,
         role: MessageRole,
         content: &str,
+        image_attachment: Option<&str>,
+        image_mime: Option<&str>,
     ) -> Result<(), MemoryError>;
 
     fn get_recent(
@@ -358,6 +368,8 @@ fn migrate_schema(conn: &Connection) -> Result<(), MemoryError> {
     let mut ver: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
 
     if ver >= SCHEMA_VERSION {
+        // Idempotent — added after v6 shipped; must run on every open for existing DBs.
+        migrate_message_image_columns(conn)?;
         ensure_seed_conversation(conn)?;
         return Ok(());
     }
@@ -397,6 +409,7 @@ fn migrate_schema(conn: &Connection) -> Result<(), MemoryError> {
     if ver < 6 {
         migrate_personality_isolation(conn)?;
     }
+    migrate_message_image_columns(conn)?;
     ensure_seed_conversation(conn)?;
     conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
@@ -526,6 +539,23 @@ fn migrate_personality_isolation(conn: &Connection) -> Result<(), MemoryError> {
         [],
     )?;
     Ok(())
+}
+
+fn migrate_message_image_columns(conn: &Connection) -> Result<(), MemoryError> {
+    if table_exists(conn, "messages")? && !column_exists(conn, "messages", "image_attachment")? {
+        conn.execute("ALTER TABLE messages ADD COLUMN image_attachment TEXT", [])?;
+    }
+    if table_exists(conn, "messages")? && !column_exists(conn, "messages", "image_mime")? {
+        conn.execute("ALTER TABLE messages ADD COLUMN image_mime TEXT", [])?;
+    }
+    Ok(())
+}
+
+fn enrich_message_image_paths(msg: &mut StoredMessage, data_dir: &Path) {
+    if let Some(ref rel) = msg.image_attachment {
+        let abs = crate::attachments::absolute_attachment_path(data_dir, rel);
+        msg.image_display_path = Some(abs.to_string_lossy().into_owned());
+    }
 }
 
 fn ensure_memory_anchor_tables(conn: &Connection) -> Result<(), MemoryError> {
@@ -728,6 +758,7 @@ pub fn apply_profile_pragmas(conn: &Connection, profile: SqliteProfile) -> Resul
 
 pub struct MemoryAnchor {
     conn: Mutex<Connection>,
+    data_directory: PathBuf,
     /// All list/create/recall operations scope to this companion profile id unless empty (`default`).
     active_personality_id: Mutex<String>,
 }
@@ -742,14 +773,17 @@ impl MemoryAnchor {
         profile: SqliteProfile,
     ) -> Result<Self, MemoryError> {
         let path = db_path.as_ref();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let data_directory = path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or(MemoryError::NoDataDir)?;
+        std::fs::create_dir_all(&data_directory)?;
         let conn = Connection::open(path)?;
         apply_profile_pragmas(&conn, profile)?;
         migrate_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            data_directory,
             active_personality_id: Mutex::new(String::from(DEFAULT_PERSONALITY_ID)),
         })
     }
@@ -1194,6 +1228,9 @@ impl MemoryAnchor {
                 role: MessageRole::parse_db(&role_str)?,
                 content: row.get(2)?,
                 created_at: row.get(3)?,
+                image_attachment: None,
+                image_mime: None,
+                image_display_path: None,
                 conversation_id: None,
                 conversation_title: None,
             });
@@ -1270,6 +1307,9 @@ impl MemoryAnchor {
                 role: MessageRole::parse_db(&role_str)?,
                 content: row.get(2)?,
                 created_at: row.get(3)?,
+                image_attachment: None,
+                image_mime: None,
+                image_display_path: None,
                 conversation_id: row.get(4)?,
                 conversation_title: row.get(5)?,
             });
@@ -1493,13 +1533,23 @@ impl ConversationMemory for MemoryAnchor {
         conversation_id: &str,
         role: MessageRole,
         content: &str,
+        image_attachment: Option<&str>,
+        image_mime: Option<&str>,
     ) -> Result<(), MemoryError> {
         self.assert_conversation_exists(conversation_id)?;
         let pid = self.active_personality()?;
         let conn = self.conn()?;
         conn.execute(
-            "INSERT INTO messages (conversation_id, role, content, personality_id) VALUES (?1, ?2, ?3, ?4)",
-            params![conversation_id, role.as_db_str(), content, pid],
+            "INSERT INTO messages (conversation_id, role, content, personality_id, image_attachment, image_mime)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                conversation_id,
+                role.as_db_str(),
+                content,
+                pid,
+                image_attachment,
+                image_mime
+            ],
         )?;
         conn.execute(
             "UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?1 AND personality_id = ?2",
@@ -1518,7 +1568,7 @@ impl ConversationMemory for MemoryAnchor {
         let limit_i: i64 = limit.try_into().unwrap_or(i64::MAX);
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, role, content, created_at FROM messages
+            "SELECT id, role, content, created_at, image_attachment, image_mime FROM messages
              WHERE conversation_id = ?1 AND personality_id = ?2
              ORDER BY id DESC LIMIT ?3",
         )?;
@@ -1526,14 +1576,19 @@ impl ConversationMemory for MemoryAnchor {
         let mut batch = Vec::new();
         while let Some(row) = rows.next()? {
             let role_str: String = row.get(1)?;
-            batch.push(StoredMessage {
+            let mut msg = StoredMessage {
                 id: row.get(0)?,
                 role: MessageRole::parse_db(&role_str)?,
                 content: row.get(2)?,
                 created_at: row.get(3)?,
+                image_attachment: row.get(4)?,
+                image_mime: row.get(5)?,
+                image_display_path: None,
                 conversation_id: None,
                 conversation_title: None,
-            });
+            };
+            enrich_message_image_paths(&mut msg, &self.data_directory);
+            batch.push(msg);
         }
         batch.reverse();
         Ok(batch)
@@ -1846,6 +1901,44 @@ pub fn default_db_path() -> Result<PathBuf, MemoryError> {
 #[cfg(test)]
 mod anchor_storage_tests {
     use super::*;
+
+    #[test]
+    fn image_columns_migrate_on_already_v6_db() {
+        let dir = std::env::temp_dir().join(format!("nova_mem_img_mig_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join("nova_memory.sqlite");
+        {
+            let conn = Connection::open(&path).expect("open");
+            conn.execute_batch(
+                r"PRAGMA user_version = 6;
+                CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                    updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                    personality_id TEXT NOT NULL DEFAULT 'default'
+                );
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    conversation_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                    personality_id TEXT NOT NULL DEFAULT 'default'
+                );
+                INSERT INTO conversations (id, title, personality_id) VALUES ('default', 'General', 'default');
+                INSERT INTO messages (conversation_id, role, content, personality_id)
+                    VALUES ('default', 'user', 'hello', 'default');",
+            )
+            .expect("seed");
+        }
+        let mem =
+            MemoryAnchor::new_with_profile(&path, SqliteProfile::Portable).expect("open migrates");
+        let msgs = ConversationMemory::get_recent(&mem, "default", 10).expect("get_recent");
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].content, "hello");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn sqlite_anchor_content_roundtrips_long_unicode() {

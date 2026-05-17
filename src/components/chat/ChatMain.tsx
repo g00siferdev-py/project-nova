@@ -1,12 +1,30 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { ChevronDown, Loader2, PanelRightOpen, Send, Sparkles, Users } from "lucide-react";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import {
+  ChevronDown,
+  ImagePlus,
+  Loader2,
+  PanelRightOpen,
+  Send,
+  Sparkles,
+  Users,
+  X,
+} from "lucide-react";
 import type { ChatMessage } from "@/types/chat";
 import type { StreamAssistantState } from "@/hooks/useChat";
+import { readImageFileAsDataUrl } from "@/lib/chatAttachments";
 
 export type CompanionHeaderOption = {
   id: string;
   companionName: string;
   profileName: string;
+};
+
+export type PendingComposerImage = {
+  file: File;
+  previewUrl: string;
+  base64: string;
+  mime: string;
 };
 
 type Props = {
@@ -21,7 +39,9 @@ type Props = {
   error: string | null;
   settingsOpen: boolean;
   onToggleSettings: () => void;
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, image?: PendingComposerImage | null) => void;
+  /** Active provider + model accept images (from `chat_vision_supported`). */
+  visionSupported: boolean;
   /** Which companion profile is active for memory + new chats. */
   activeCompanionProfileId: string;
   activeCompanionLabel: string;
@@ -29,6 +49,16 @@ type Props = {
   /** Called when the user picks a companion; awaited from the select handler when async. */
   onCompanionChange: (profileId: string) => void | Promise<unknown>;
 };
+
+function messageImageSrc(m: ChatMessage): string | null {
+  if (!m.imageDisplayPath) return null;
+  if (m.imageDisplayPath.startsWith("blob:")) return m.imageDisplayPath;
+  try {
+    return convertFileSrc(m.imageDisplayPath);
+  } catch {
+    return m.imageDisplayPath;
+  }
+}
 
 export function ChatMain({
   title,
@@ -42,25 +72,64 @@ export function ChatMain({
   settingsOpen,
   onToggleSettings,
   onSendMessage,
+  visionSupported,
   activeCompanionProfileId,
   activeCompanionLabel,
   companionOptions,
   onCompanionChange,
 }: Props) {
   const scrollAreaRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [draft, setDraft] = useState("");
+  const [pendingImage, setPendingImage] = useState<PendingComposerImage | null>(null);
 
   useEffect(() => {
     const el = scrollAreaRef.current;
     if (!el) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [messages, threadLoading, streamAssistant]);
+  }, [messages, threadLoading, streamAssistant, pendingImage]);
+
+  const clearPendingImage = () => {
+    setPendingImage((prev) => {
+      if (prev?.previewUrl.startsWith("blob:")) {
+        URL.revokeObjectURL(prev.previewUrl);
+      }
+      return null;
+    });
+  };
+
+  const canSend =
+    hasActiveConversation &&
+    !threadLoading &&
+    !sending &&
+    (draft.trim().length > 0 || pendingImage != null);
+
+  const submit = () => {
+    if (!canSend) return;
+    onSendMessage(draft, pendingImage);
+    setDraft("");
+    clearPendingImage();
+  };
 
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (!draft.trim() || sending || threadLoading || !hasActiveConversation) return;
-    onSendMessage(draft);
-    setDraft("");
+    submit();
+  };
+
+  const onPickImage = async (file: File | null) => {
+    if (!file || !file.type.startsWith("image/")) return;
+    try {
+      const { base64, mime } = await readImageFileAsDataUrl(file);
+      const previewUrl = URL.createObjectURL(file);
+      setPendingImage((prev) => {
+        if (prev?.previewUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(prev.previewUrl);
+        }
+        return { file, previewUrl, base64, mime };
+      });
+    } catch {
+      /* ignore read errors */
+    }
   };
 
   return (
@@ -180,7 +249,16 @@ export function ChatMain({
                 <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500">
                   {m.role === "user" ? "You" : "Nova"}
                 </p>
-                <p className="whitespace-pre-wrap">{m.content}</p>
+                {messageImageSrc(m) ? (
+                  <img
+                    src={messageImageSrc(m)!}
+                    alt=""
+                    className="mb-2 max-h-64 max-w-full rounded-lg border border-slate-700/80 object-contain"
+                  />
+                ) : null}
+                {m.content ? (
+                  <p className="whitespace-pre-wrap">{m.content}</p>
+                ) : null}
               </article>
             ))
           )}
@@ -206,8 +284,50 @@ export function ChatMain({
       <footer className="shrink-0 border-t border-slate-800/80 p-4">
         <form
           onSubmit={handleSubmit}
-          className="mx-auto flex max-w-3xl gap-2"
+          className="mx-auto flex max-w-3xl flex-col gap-2"
         >
+          {pendingImage ? (
+            <div className="relative inline-flex w-fit max-w-full items-start gap-2 rounded-xl border border-slate-700/80 bg-slate-900/60 p-2">
+              <img
+                src={pendingImage.previewUrl}
+                alt="Attached"
+                className="max-h-24 max-w-full rounded-lg object-contain"
+              />
+              <button
+                type="button"
+                onClick={clearPendingImage}
+                className="absolute -right-2 -top-2 rounded-full border border-slate-600 bg-slate-800 p-0.5 text-slate-300 hover:bg-slate-700"
+                aria-label="Remove attached image"
+              >
+                <X className="size-3.5" aria-hidden />
+              </button>
+            </div>
+          ) : null}
+          <div className="flex gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="sr-only"
+            onChange={(e) => {
+              void onPickImage(e.target.files?.[0] ?? null);
+              e.target.value = "";
+            }}
+          />
+          <button
+            type="button"
+            disabled={threadLoading || sending || !hasActiveConversation || !visionSupported}
+            onClick={() => fileInputRef.current?.click()}
+            title={
+              visionSupported
+                ? "Attach image"
+                : "Current model does not support images — switch to a vision model in Settings → Provider (e.g. gpt-4o, Claude 3+, llava, kimi)."
+            }
+            className="inline-flex shrink-0 items-center justify-center self-end rounded-xl border border-slate-700/80 bg-slate-900/60 px-3 py-2 text-slate-300 transition hover:border-slate-600 hover:bg-slate-800/80 disabled:pointer-events-none disabled:opacity-40"
+            aria-label="Attach image"
+          >
+            <ImagePlus className="size-4" aria-hidden />
+          </button>
           <label className="sr-only" htmlFor="nova-composer">
             Message
           </label>
@@ -219,9 +339,7 @@ export function ChatMain({
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                if (!draft.trim() || sending || threadLoading || !hasActiveConversation) return;
-                onSendMessage(draft);
-                setDraft("");
+                submit();
               }
             }}
             disabled={threadLoading || sending || !hasActiveConversation}
@@ -232,7 +350,7 @@ export function ChatMain({
           />
           <button
             type="submit"
-            disabled={threadLoading || sending || !draft.trim() || !hasActiveConversation}
+            disabled={!canSend}
             className="inline-flex shrink-0 items-center justify-center gap-2 self-end rounded-xl bg-indigo-500 px-3 py-2 text-white shadow-sm shadow-indigo-500/25 transition hover:bg-indigo-400 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400 disabled:pointer-events-none disabled:opacity-40"
             aria-label="Send message"
           >
@@ -242,6 +360,7 @@ export function ChatMain({
               <Send className="size-4" aria-hidden />
             )}
           </button>
+          </div>
         </form>
       </footer>
     </section>

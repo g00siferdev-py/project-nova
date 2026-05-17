@@ -9,6 +9,7 @@
 //! `main.rs` delegates here so the same setup runs everywhere.
 
 mod agent_tools;
+mod attachments;
 mod chat;
 mod database_query;
 mod memory;
@@ -373,7 +374,7 @@ fn memory_store_message(
 ) -> Result<(), String> {
     state
         .memory
-        .store_message(&conversation_id, role, &content)
+        .store_message(&conversation_id, role, &content, None, None)
         .map_err(|e| e.to_string())
 }
 
@@ -578,6 +579,7 @@ pub fn run() {
             personality_get,
             personality_save,
             chat::chat_send_message,
+            chat::chat_vision_supported,
             memory_set_active_personality,
             memory_list_conversations,
             memory_get_conversation,

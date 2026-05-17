@@ -82,7 +82,7 @@ async fn run_pulse_tick(app: &AppHandle, state: &NovaState) {
 
     let pid = state.personality.active_profile_id();
 
-    match chat::execute_chat_turn(app, state, &cid, &message, &pid).await {
+    match chat::execute_chat_turn(app, state, &cid, &message, &pid, None).await {
         Ok(reply) => {
             let summary = reply.trim().to_string();
             let ok = !summary.is_empty();

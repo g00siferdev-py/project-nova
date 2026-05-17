@@ -63,6 +63,7 @@ export function useChat() {
   const [personalityFile, setPersonalityFile] = useState<PersonalityFile | null>(null);
   /** When true, the sidebar shows no threads and the main pane has no selection — SQLite is unchanged. */
   const [threadListHiddenFromSidebar, setThreadListHiddenFromSidebar] = useState(false);
+  const [visionSupported, setVisionSupported] = useState(false);
 
   const loadSeq = useRef(0);
   const activeConversationIdRef = useRef<string | null>(null);
@@ -76,6 +77,15 @@ export function useChat() {
   useEffect(() => {
     activePersonalityIdRef.current = activePersonalityId;
   }, [activePersonalityId]);
+
+  const refreshVisionSupported = useCallback(async () => {
+    try {
+      const ok = await invoke<boolean>("chat_vision_supported");
+      setVisionSupported(ok);
+    } catch {
+      setVisionSupported(false);
+    }
+  }, []);
 
   const refreshConversations = useCallback(async () => {
     try {
@@ -97,26 +107,43 @@ export function useChat() {
     const seq = ++loadSeq.current;
     setThreadLoading(true);
     setError(null);
+    let messagesLoaded = false;
     try {
-      const [brief, recent, anchorList] = await Promise.all([
-        memoryStartupBriefing(conversationId),
-        memoryGetRecent(conversationId, RECENT_LIMIT),
-        memoryListAnchors(conversationId, 48),
-      ]);
+      const recent = await memoryGetRecent(conversationId, RECENT_LIMIT);
       if (seq !== loadSeq.current) return;
-      setBriefing(brief);
-      setAnchors(anchorList);
       setMessages(recent.map(storedToChatMessage));
+      messagesLoaded = true;
+
+      try {
+        const [brief, anchorList] = await Promise.all([
+          memoryStartupBriefing(conversationId),
+          memoryListAnchors(conversationId, 48),
+        ]);
+        if (seq !== loadSeq.current) return;
+        setBriefing(brief);
+        setAnchors(anchorList);
+      } catch (sidebarErr) {
+        if (seq !== loadSeq.current) return;
+        const sidebarMsg =
+          sidebarErr instanceof Error
+            ? sidebarErr.message
+            : "Could not load memory sidebar.";
+        setError(`Could not refresh memory sidebar: ${sidebarMsg}`);
+        setBriefing("");
+        setAnchors([]);
+      }
     } catch (e) {
       if (seq !== loadSeq.current) return;
       const msg =
         e instanceof Error
           ? e.message
           : "Could not load chat history. Use npm run tauri dev for the full app.";
-      setError(msg);
-      setBriefing("");
-      setAnchors([]);
-      setMessages([]);
+      if (!messagesLoaded) {
+        setError(msg);
+        setMessages([]);
+        setBriefing("");
+        setAnchors([]);
+      }
     } finally {
       // Always clear: a newer `loadSeq` (e.g. from an in-flight send) may have invalidated this load
       // while it still held threadLoading true.
@@ -273,6 +300,7 @@ export function useChat() {
         activePersonalityIdRef.current = pid;
         setActivePersonalityId(pid);
         const list = await refreshConversations();
+        await refreshVisionSupported();
         if (cancelled) return;
         setListLoading(false);
         if (list.length === 0) {
@@ -296,7 +324,7 @@ export function useChat() {
     return () => {
       cancelled = true;
     };
-  }, [refreshConversations]);
+  }, [refreshConversations, refreshVisionSupported]);
 
   useEffect(() => {
     if (!activeConversationId) {
@@ -461,10 +489,13 @@ export function useChat() {
   }, [activeConversationId, loadActiveThread, refreshConversations]);
 
   const sendMessage = useCallback(
-    async (text: string) => {
+    async (
+      text: string,
+      image?: { base64: string; mime: string; previewUrl?: string } | null,
+    ) => {
       const trimmed = text.trim();
       const convId = activeConversationId;
-      if (!trimmed || sending) return;
+      if ((!trimmed && !image) || sending) return;
       if (!convId) {
         setError(
           'No conversation is open. Click "New chat" in the sidebar (or restore your app data folder), then try again.',
@@ -473,7 +504,16 @@ export function useChat() {
       }
 
       const tempUserId = `local-${Date.now()}`;
-      setMessages((prev) => [...prev, { id: tempUserId, role: "user", content: trimmed }]);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: tempUserId,
+          role: "user",
+          content: trimmed || "(photo)",
+          imageDisplayPath: image?.previewUrl,
+          imageMime: image?.mime,
+        },
+      ]);
       setSending(true);
       setStreamAssistant(null);
       setError(null);
@@ -489,11 +529,14 @@ export function useChat() {
         console.info("[nova-chat] chat_send_message invoke", {
           personalityId: personalityIdForSend,
           conversationId: convId,
+          hasImage: Boolean(image),
         });
         const result = await invoke<ChatSendResult>("chat_send_message", {
           conversationId: convId,
           message: trimmed,
           personalityId: personalityIdForSend,
+          imageBase64: image?.base64 ?? null,
+          imageMime: image?.mime ?? null,
         });
 
         const assistantId = `local-a-${Date.now()}`;
@@ -504,6 +547,7 @@ export function useChat() {
 
         void refreshSidebarContext(convId);
         await refreshConversations();
+        await refreshVisionSupported();
       } catch (e) {
         const msg =
           e instanceof Error
@@ -554,6 +598,8 @@ export function useChat() {
     deleteConversation,
     extractAnchorsFromChat,
     sendMessage,
+    visionSupported,
+    refreshVisionSupported,
     refreshConversations,
     applyActivePersonality,
   };

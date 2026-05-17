@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use std::path::Path;
 
+use crate::attachments::{self, model_supports_vision};
 use crate::memory::{ConversationMemory, MemoryRecallBundle, MessageRole, DEFAULT_PERSONALITY_ID};
 use crate::provider::{
     build_engine, ChatSendResult, ChatTurn, CompletionRequest, CompletionResponse, LLMProviderEngine,
@@ -409,9 +410,22 @@ async fn run_chat_completion(
     let database_app_data_enabled = state.settings.database_app_data_enabled();
     let database_allow_write = state.settings.database_allow_write();
 
+    let has_images = attachments::messages_include_images(&messages);
+    let provider_id = engine.provider_id();
+    // Ollama often ignores `images` when `tools` are present — prefer vision over tools for that turn.
     let agent_tool_backend = (!tool_definitions.is_empty())
-        .then(|| web_tool_backend_for_provider(engine.provider_id()))
-        .flatten();
+        .then(|| web_tool_backend_for_provider(provider_id))
+        .flatten()
+        .filter(|_| {
+            !(has_images && matches!(provider_id, "ollama" | "ollama_cloud"))
+        });
+
+    if has_images {
+        eprintln!(
+            "nova: chat completion includes image(s) for provider={provider_id} tools={}",
+            agent_tool_backend.is_some()
+        );
+    }
 
     let mut full = String::new();
 
@@ -523,10 +537,16 @@ async fn run_chat_completion(
 
     state
         .memory
-        .store_message(conversation_id, MessageRole::Assistant, &reply)
+        .store_message(conversation_id, MessageRole::Assistant, &reply, None, None)
         .map_err(|e| e.to_string())?;
 
     Ok(reply)
+}
+
+/// Saved image for the user turn about to be stored.
+pub struct PendingImage {
+    pub rel_path: String,
+    pub mime: String,
 }
 
 /// One user turn on an existing conversation — same path for manual send and scheduled Pulse.
@@ -536,9 +556,10 @@ pub async fn execute_chat_turn(
     conversation_id: &str,
     message: &str,
     personality_id: &str,
+    pending_image: Option<PendingImage>,
 ) -> Result<String, String> {
-    let content = message.trim();
-    if content.is_empty() {
+    let text = message.trim();
+    if text.is_empty() && pending_image.is_none() {
         return Err("message content is empty".into());
     }
 
@@ -554,11 +575,6 @@ pub async fn execute_chat_turn(
         .map_err(|e| format!("companion persona sync: {e}"))?;
     ConversationMemory::set_active_personality(&*state.memory, pid);
 
-    state
-        .memory
-        .store_message(conversation_id, MessageRole::User, content)
-        .map_err(|e| e.to_string())?;
-
     let engine: std::sync::Arc<dyn LLMProviderEngine + Send + Sync> =
         match build_engine(&state.http, &state.settings) {
             Ok(e) => {
@@ -567,6 +583,23 @@ pub async fn execute_chat_turn(
             }
             Err(e) => return Err(e.to_string()),
         };
+
+    if pending_image.is_some() && !model_supports_vision(engine.provider_id(), &engine.model_info().model_id) {
+        return Err(format!(
+            "The active model ({}) does not support image input. Switch to a vision-capable model (e.g. gpt-4o, Claude 3+, or a llava/vision Ollama model).",
+            engine.model_info().model_id
+        ));
+    }
+
+    let (img_rel, img_mime) = match &pending_image {
+        Some(p) => (Some(p.rel_path.as_str()), Some(p.mime.as_str())),
+        None => (None, None),
+    };
+
+    state
+        .memory
+        .store_message(conversation_id, MessageRole::User, text, img_rel, img_mime)
+        .map_err(|e| e.to_string())?;
 
     let _ = app.emit(
         "chat:stream-start",
@@ -580,8 +613,13 @@ pub async fn execute_chat_turn(
         .get_startup_briefing(conversation_id)
         .map_err(|e| e.to_string())?;
 
-    if should_auto_memory_recall(content) {
-        let recall_q: String = content.chars().take(520).collect();
+    let recall_source = if !text.is_empty() {
+        text
+    } else {
+        "image attachment"
+    };
+    if should_auto_memory_recall(recall_source) {
+        let recall_q: String = recall_source.chars().take(520).collect();
         match state.memory.memory_recall(&recall_q, None, 12, 14) {
             Ok(bundle) if !bundle.anchors.is_empty() || !bundle.messages.is_empty() => {
                 let block = format_recall_for_prompt(&bundle, 1_800);
@@ -608,14 +646,14 @@ pub async fn execute_chat_turn(
         }
     };
 
+    let provider_id = engine.provider_id().to_string();
+    let data_dir = state.data_directory.as_path();
+
     let mut messages: Vec<ChatTurn> = Vec::with_capacity(recent.len() + 1);
     messages.push(ChatTurn::text("system", system_content));
     for m in recent {
-        let role = match m.role {
-            MessageRole::User => "user",
-            MessageRole::Assistant => "assistant",
-        };
-        messages.push(ChatTurn::text(role, m.content));
+        let turn = attachments::chat_turn_from_stored(&provider_id, data_dir, &m)?;
+        messages.push(turn);
     }
 
     run_chat_completion(app, state, conversation_id, &engine, messages).await
@@ -628,6 +666,8 @@ pub async fn chat_send_message(
     conversation_id: String,
     message: String,
     personality_id: Option<String>,
+    image_base64: Option<String>,
+    image_mime: Option<String>,
 ) -> Result<ChatSendResult, String> {
     let pid = personality_id
         .as_deref()
@@ -635,7 +675,38 @@ pub async fn chat_send_message(
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_PERSONALITY_ID);
 
-    let reply = execute_chat_turn(&app, &state, conversation_id.trim(), &message, pid).await?;
+    let engine_probe = build_engine(&state.http, &state.settings).map_err(|e| e.to_string())?;
+    let pending_image = match (image_base64, image_mime) {
+        (Some(b64), Some(mime)) if !b64.trim().is_empty() => {
+            let info = engine_probe.model_info();
+            if !model_supports_vision(engine_probe.provider_id(), &info.model_id) {
+                return Err(format!(
+                    "The active model ({}) does not support image input. Switch to a vision-capable model (e.g. gpt-4o, Claude 3+, or a llava/vision Ollama model).",
+                    info.model_id
+                ));
+            }
+            let (rel, mime) = attachments::save_image_attachment(
+                &state.data_directory,
+                conversation_id.trim(),
+                &mime,
+                &b64,
+            )?;
+            Some(PendingImage { rel_path: rel, mime })
+        }
+        (Some(_), None) => return Err("imageMime is required when sending an image".into()),
+        (None, Some(_)) => return Err("image data missing".into()),
+        _ => None,
+    };
+
+    let reply = execute_chat_turn(
+        &app,
+        &state,
+        conversation_id.trim(),
+        &message,
+        pid,
+        pending_image,
+    )
+    .await?;
 
     let engine = state.llm.read().await.clone();
     let info = engine.model_info();
@@ -645,4 +716,11 @@ pub async fn chat_send_message(
         provider_id: info.provider_id,
         model_id: info.model_id,
     })
+}
+
+#[tauri::command]
+pub async fn chat_vision_supported(state: State<'_, NovaState>) -> Result<bool, String> {
+    let engine = state.llm.read().await.clone();
+    let info = engine.model_info();
+    Ok(model_supports_vision(&info.provider_id, &info.model_id))
 }

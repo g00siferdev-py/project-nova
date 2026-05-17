@@ -62,13 +62,6 @@ export function ChatLayout() {
     void loadBackendHint();
   }, [loadBackendHint]);
 
-  useEffect(() => {
-    if (prevSettingsOpen.current && !settingsOpen) {
-      void loadBackendHint();
-    }
-    prevSettingsOpen.current = settingsOpen;
-  }, [settingsOpen, loadBackendHint]);
-
   const {
     conversations,
     conversationsForTitle,
@@ -90,11 +83,21 @@ export function ChatLayout() {
     deleteConversation,
     extractAnchorsFromChat,
     sendMessage,
+    visionSupported,
+    refreshVisionSupported,
     applyActivePersonality,
     activePersonalityId,
     activeCompanionLabel,
     companionOptions,
   } = useChat();
+
+  useEffect(() => {
+    if (prevSettingsOpen.current && !settingsOpen) {
+      void loadBackendHint();
+      void refreshVisionSupported();
+    }
+    prevSettingsOpen.current = settingsOpen;
+  }, [settingsOpen, loadBackendHint, refreshVisionSupported]);
 
   const title = useMemo(() => {
     if (!activeConversationId) return "Nova";
@@ -146,7 +149,12 @@ export function ChatLayout() {
           error={error}
           settingsOpen={settingsOpen}
           onToggleSettings={() => setSettingsOpen((v) => !v)}
-          onSendMessage={(text) => void sendMessage(text)}
+          onSendMessage={(text, image) =>
+            void sendMessage(text, image
+              ? { base64: image.base64, mime: image.mime, previewUrl: image.previewUrl }
+              : null)
+          }
+          visionSupported={visionSupported}
           activeCompanionProfileId={activePersonalityId}
           activeCompanionLabel={activeCompanionLabel}
           companionOptions={companionOptions}
